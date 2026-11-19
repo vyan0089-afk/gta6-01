@@ -1,0 +1,68 @@
+<!doctype html>
+<html lang="id">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Tanjung Matahari — Game Dunia Terbuka</title>
+<style>
+  html, body { margin: 0; height: 100%; overflow: hidden; background: #0e1a24; font-family: 'Segoe UI', system-ui, sans-serif; }
+  #game { position: fixed; inset: 0; width: 100%; height: 100%; display: block; touch-action: none; }
+  #status { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap; }
+  #hud { position: fixed; inset: 0; pointer-events: none; color: #fff; }
+  #vignette { position: absolute; inset: 0; box-shadow: inset 0 0 120px rgba(255,0,0,0); transition: box-shadow .15s; }
+  #vignette.hit { box-shadow: inset 0 0 120px rgba(255,0,0,.55); }
+  #status { top: 14px; left: 14px; }
+  .bar { display: flex; align-items: center; gap: 6px; margin-bottom: 5px; }
+  .bar .label { font-size: 10px; font-weight: 700; letter-spacing: 1px; width: 44px; text-shadow: 0 1px 2px #000; }
+  .track { width: 170px; height: 10px; background: rgba(0,0,0,.55); border: 1px solid rgba(255,255,255,.35); border-radius: 5px; overflow: hidden; }
+  .fill { height: 100%; }
+  .fill.hp { background: linear-gradient(90deg, #2ecc71, #7bed9f); width: 100%; }
+  .fill.armour { background: linear-gradient(90deg, #3498db, #70a1ff); width: 0%; }
+  #money { font-size: 22px; font-weight: 800; text-shadow: 0 2px 3px #000; color: #7bed9f; }
+  #respect { font-size: 12px; text-shadow: 0 1px 2px #000; opacity: .95; }
+  #wanted { position: absolute; top: 12px; right: 16px; font-size: 30px; letter-spacing: 4px; text-shadow: 0 2px 4px #000; }
+  #wanted .star { color: rgba(255,255,255,.25); }
+  #wanted .star.on { color: #ffd23f; }
+  #objective { position: absolute; top: 14px; left: 50%; transform: translateX(-50%); text-align: center; background: rgba(0,0,0,.55); padding: 8px 18px; border-radius: 8px; border: 1px solid rgba(255,210,63,.5); max-width: 520px; }
+  #objText { font-size: 15px; font-weight: 600; }
+  #objTimer { font-size: 13px; color: #ffd23f; font-weight: 700; }
+  #feed { position: absolute; top: 110px; right: 16px; width: 300px; text-align: right; font-size: 12px; }
+  .feedLine { background: rgba(0,0,0,.5); padding: 4px 8px; margin-bottom: 4px; border-radius: 5px; border-right: 3px solid #3498db; }
+  #prompt { position: absolute; bottom: 150px; left: 50%; transform: translateX(-50%); background: rgba(0,0,0,.65); padding: 8px 16px; border-radius: 8px; font-size: 15px; border: 1px solid rgba(255,255,255,.4); display: none; }
+  #banner { position: absolute; top: 32%; left: 50%; transform: translateX(-50%); text-align: center; opacity: 0; transition: opacity .4s; }
+  #banner.show { opacity: 1; }
+  #bannerTitle { font-size: 44px; font-weight: 900; letter-spacing: 3px; color: #ffd23f; text-shadow: 0 3px 0 #b33939, 0 5px 12px #000; }
+  #bannerSub { font-size: 16px; text-shadow: 0 2px 4px #000; margin-top: 6px; }
+  #speed { position: absolute; bottom: 16px; right: 18px; text-align: right; display: none; }
+  #speedNum { font-size: 46px; font-weight: 900; text-shadow: 0 2px 4px #000; }
+  #speedUnit { font-size: 14px; margin-left: 4px; }
+  #carName { font-size: 13px; color: #ffd23f; text-shadow: 0 1px 2px #000; }
+  #radio { position: absolute; bottom: 16px; left: 250px; font-size: 13px; text-shadow: 0 1px 2px #000; background: rgba(0,0,0,.45); padding: 6px 10px; border-radius: 6px; }
+  #radio span { color: #ffd23f; }
+  #wheel { position: absolute; bottom: 120px; left: 50%; transform: translateX(-50%); display: none; gap: 10px; }
+  .wslot { background: rgba(0,0,0,.65); border: 2px solid rgba(255,255,255,.35); padding: 10px 16px; border-radius: 8px; font-size: 15px; }
+  .wslot.sel { border-color: #ffd23f; background: rgba(255,210,63,.25); }
+  #minimap { position: absolute; left: 14px; bottom: 14px; border: 2px solid rgba(255,255,255,.5); border-radius: 8px; background: rgba(10,30,25,.85); }
+  #menu { position: absolute; inset: 0; display: none; align-items: center; justify-content: center; background: rgba(5, 15, 25, .28); pointer-events: auto; }
+  .panel { background: rgba(8, 22, 34, .92); border: 2px solid #ffd23f; border-radius: 14px; padding: 28px 34px; max-width: 560px; text-align: center; box-shadow: 0 10px 40px rgba(0,0,0,.6); }
+  .panel h2 { margin: 0 0 12px; color: #ffd23f; letter-spacing: 2px; }
+  .panel p { font-size: 14px; line-height: 1.5; }
+  .gameTitle { font-size: 58px; font-weight: 900; line-height: .95; letter-spacing: 2px; color: #ffd23f; text-shadow: 0 4px 0 #b33939, 0 8px 20px #000; }
+  .tagline { margin: 12px 0 20px; font-size: 15px; color: #dfe9f3; }
+  .btns { display: flex; flex-direction: column; gap: 10px; margin-top: 14px; }
+  .btns button, .shopRow button { pointer-events: auto; cursor: pointer; background: #ffd23f; color: #1a1a1a; border: none; border-radius: 8px; padding: 11px 22px; font-size: 16px; font-weight: 700; }
+  .btns button:hover, .shopRow button:hover { background: #ffe27a; }
+  .foot { margin-top: 18px; font-size: 11px; opacity: .7; }
+  .help { text-align: left; font-size: 14px; line-height: 1.6; }
+  .help b { color: #ffd23f; }
+  .shopRow { text-align: left; background: rgba(255,255,255,.06); border-radius: 8px; padding: 10px 12px; margin-bottom: 8px; font-size: 14px; }
+  .shopRow button { padding: 5px 14px; font-size: 14px; margin-left: 8px; }
+</style>
+</head>
+<body>
+<canvas id="game" aria-label="Tanjung Matahari: game dunia terbuka 3D, berjalan kaki dan mengemudi di kota pantai"></canvas>
+<p id="status" role="status" aria-live="polite"></p>
+<div id="hud"></div>
+<script type="module" src="./src/main.js"></script>
+</body>
+</html>
