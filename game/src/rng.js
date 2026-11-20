@@ -1,107 +1,138 @@
-// rng.js — seeded randomness for Tanjung Matahari.
+// rng.js — Seeded random numbers for Tanjung Matahari.
 //
-// Everything random in the game — the city layout, traffic mix, pedestrian
-// clothes, police chatter — comes from here, never from Math.random().
-// Hand the same seed to buildCity() and you get the same streets, the same
-// buildings, the same traffic, every single time. That is what makes the
-// screenshots deterministic and the city fair to play in.
+// Every random choice in the city (building heights, traffic colours, pedestrian
+// outfits, radio jingles) comes from one seeded generator, so the same seed always
+// builds the same city. The generator is a small mulberry32-style hash: cheap,
+// deterministic, and good enough for a game world. Nothing here touches the
+// network or the clock; the seed is the only input.
 
-const FNV_OFFSET = 2166136261;
-const FNV_PRIME = 16777619;
-
-// FNV-1a over a string: turns a human-readable seed like
-// 'tanjung-matahari-1' into a 32-bit number the generator can use.
-export function hashString(str) {
-  let h = FNV_OFFSET >>> 0;
-  for (let i = 0; i < str.length; i++) {
-    h ^= str.charCodeAt(i);
-    h = Math.imul(h, FNV_PRIME);
+/** Make a new generator from any 32-bit seed. */
+export function makeRng(seed) {
+  let state = (seed >>> 0) || 0x9e3779b9;
+  function nextUint32() {
+    state = (state + 0x6d2b79f5) | 0;
+    let t = state;
+    t = Math.imul(t ^ (t >>> 15), t | 1);
+    t ^= t + Math.imul(t ^ (t >>> 7), t | 61);
+    return (t ^ (t >>> 14)) >>> 0;
   }
-  return h >>> 0;
-}
-
-// mulberry32: a tiny, fast, well-behaved PRNG. The state is one 32-bit word;
-// each call stirs it and returns a float in [0, 1).
-export function mulberry32(seed) {
-  let a = seed >>> 0;
-  return function next() {
-    a = (a + 0x6d2b79f5) | 0;
-    let t = Math.imul(a ^ (a >>> 15), 1 | a);
-    t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
-    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+  return {
+    /** Next raw 32-bit unsigned integer. */
+    nextUint32,
+    /** Next float in [0, 1). */
+    next() {
+      return nextUint32() / 4294967296;
+    },
+    /** Next float in [min, max). */
+    range(min, max) {
+      return min + (max - min) * (nextUint32() / 4294967296);
+    },
+    /** Next integer in [min, max] inclusive. */
+    int(min, max) {
+      return min + Math.floor((nextUint32() / 4294967296) * (max - min + 1));
+    },
+    /** True with probability p (0..1). */
+    chance(p) {
+      return (nextUint32() / 4294967296) < p;
+    },
+    /** Pick one element of a non-empty array. */
+    pick(list) {
+      return list[Math.floor((nextUint32() / 4294967296) * list.length)];
+    },
+    /** Pick `count` distinct elements, in order, from a list. */
+    pickMany(list, count) {
+      const copy = list.slice();
+      const out = [];
+      for (let i = 0; i < count && copy.length > 0; i += 1) {
+        const at = Math.floor((nextUint32() / 4294967296) * copy.length);
+        out.push(copy.splice(at, 1)[0]);
+      }
+      return out;
+    },
+    /** Shuffle a copy of a list (Fisher-Yates). */
+    shuffle(list) {
+      const copy = list.slice();
+      for (let i = copy.length - 1; i > 0; i -= 1) {
+        const j = Math.floor((nextUint32() / 4294967296) * (i + 1));
+        const tmp = copy[i];
+        copy[i] = copy[j];
+        copy[j] = tmp;
+      }
+      return copy;
+    },
+    /** A random angle in radians, 0..2*pi. */
+    angle() {
+      return (nextUint32() / 4294967296) * Math.PI * 2;
+    },
+    /** A random unit-ish 2D direction as {x, z}. */
+    direction() {
+      const a = (nextUint32() / 4294967296) * Math.PI * 2;
+      return { x: Math.cos(a), z: Math.sin(a) };
+    },
+    /** A random pastel-ish colour as [r, g, b] floats 0..1. */
+    pastel() {
+      const base = 0.45 + (nextUint32() / 4294967296) * 0.4;
+      return [
+        Math.min(1, base + (nextUint32() / 4294967296) * 0.3),
+        Math.min(1, base + (nextUint32() / 4294967296) * 0.3),
+        Math.min(1, base + (nextUint32() / 4294967296) * 0.3),
+      ];
+    },
   };
 }
 
-// A friendly wrapper around a mulberry32 stream, with the helpers the game
-// actually reaches for: ranges, integer rolls, picks, weighted picks,
-// coin flips and shuffles.
-export class Rng {
-  constructor(seed) {
-    this.next = mulberry32(seed >>> 0);
+/** Hash a short string into a 32-bit seed (FNV-1a). */
+export function seedFromString(text) {
+  let hash = 0x811c9dc5;
+  for (let i = 0; i < text.length; i += 1) {
+    hash ^= text.charCodeAt(i);
+    hash = Math.imul(hash, 0x01000193);
   }
+  return hash >>> 0;
+}
 
-  // Raw float in [0, 1).
-  float() {
-    return this.next();
-  }
+/** Clamp a number into [min, max]. */
+export function clamp(value, min, max) {
+  return value < min ? min : value > max ? max : value;
+}
 
-  // Float in [min, max).
-  range(min, max) {
-    return min + this.next() * (max - min);
-  }
+/** Linear interpolation between a and b. */
+export function lerp(a, b, t) {
+  return a + (b - a) * t;
+}
 
-  // Integer in [min, max], both ends included.
-  int(min, max) {
-    return min + Math.floor(this.next() * (max - min + 1));
-  }
+/** Shortest signed angle difference from `from` to `to`, in radians. */
+export function angleDelta(from, to) {
+  let d = (to - from) % (Math.PI * 2);
+  if (d > Math.PI) d -= Math.PI * 2;
+  if (d < -Math.PI) d += Math.PI * 2;
+  return d;
+}
 
-  // One element of an array, uniformly.
-  pick(arr) {
-    return arr[Math.floor(this.next() * arr.length)];
-  }
+/** Distance between two points on the ground plane. */
+export function dist2d(ax, az, bx, bz) {
+  const dx = ax - bx;
+  const dz = az - bz;
+  return Math.sqrt(dx * dx + dz * dz);
+}
 
-  // Pick from [value, weight] pairs. Heavier entries win more often — this
-  // is how sedans outnumber trucks on Tanjung's streets.
-  weightedPick(entries) {
-    let total = 0;
-    for (const [, w] of entries) total += w;
-    let roll = this.next() * total;
-    for (const [value, w] of entries) {
-      roll -= w;
-      if (roll <= 0) return value;
-    }
-    return entries[entries.length - 1][0];
-  }
+/** Format a distance in metres as "123 m" or "1.2 km". */
+export function formatDistance(metres) {
+  if (metres >= 1000) return `${(metres / 1000).toFixed(1)} km`;
+  return `${Math.round(metres)} m`;
+}
 
-  // True with probability p.
-  chance(p) {
-    return this.next() < p;
-  }
+/** Format a money amount as Indonesian rupiah-ish "Rp 12.500". */
+export function formatMoney(amount) {
+  const n = Math.max(0, Math.round(amount));
+  return `Rp ${String(n).replace(/\B(?=(\d{3})+(?!\d))/g, '.')}`;
+}
 
-  // True or false, fifty-fifty.
-  bool() {
-    return this.next() < 0.5;
-  }
-
-  // +1 or -1, fifty-fifty: handy for picking a side of the road.
-  sign() {
-    return this.next() < 0.5 ? -1 : 1;
-  }
-
-  // Fisher-Yates shuffle. Returns a new array; the input is untouched.
-  shuffle(arr) {
-    const out = arr.slice();
-    for (let i = out.length - 1; i > 0; i--) {
-      const j = Math.floor(this.next() * (i + 1));
-      const tmp = out[i];
-      out[i] = out[j];
-      out[j] = tmp;
-    }
-    return out;
-  }
-
-  // A signed float in [-amount, amount]: handy for jitter and scatter.
-  jitter(amount) {
-    return (this.next() * 2 - 1) * amount;
-  }
+/** Format seconds of play as "12:34". */
+export function formatClock(totalSeconds) {
+  const s = Math.floor(totalSeconds % 60);
+  const m = Math.floor(totalSeconds / 60) % 60;
+  const h = Math.floor(totalSeconds / 3600);
+  const pad = (v) => String(v).padStart(2, '0');
+  return `${pad(h)}:${pad(m)}:${pad(s)}`;
 }

@@ -1,269 +1,564 @@
-// main.js — boots Tanjung Matahari: canvas, game loop, and the deterministic
-// screenshot staging used by shots.json
-// (?shot=chase|mission|drive|map). Without a ?shot param the game starts on
-// the title screen, like a player would see it.
+// main.js — Tanjung Matahari: the game object, the loop, and the wiring.
+//
+// This is the file index.html loads. It builds the world, the player, the
+// police, the missions, the audio and the HUD, then runs the loop: read the
+// input, step the simulation, draw the frame, refresh the HUD. The game has
+// five screens — title, playing, paused, map and the dead/busted overlays —
+// and a `?shot=` query that stages one of the four screenshot scenes
+// instead of showing the title. Everything the other modules need from the
+// game lives on the one `game` object, exposed as window.__game so the
+// playtest and the shot driver can drive it.
 
-import { Game } from './game.js';
-import { createCar, driveCar } from './vehicles.js';
-import { spawnCrowd, spawnStanders } from './peds.js';
-import { saveGame } from './save.js';
-import { clamp } from './math.js';
+import { buildWorld, stepTraffic, stepPedestrians, streetNameAt, nearestRoadPoint } from './world.js';
+import { createPlayer, stepOnFoot, stepDriving, nearestCar, stealCar, exitCar, punch, shoot, selectWeapon, cycleWeapon, healPlayer, giveAmmo } from './player.js';
+import { createPolice, stepPolice, addWanted, resolveBust, clearWanted, policeDistances } from './police.js';
+import { createMissions, startMission, startPendingMission, stepMissions, stepSideJob, nearbySideJob, currentMarker, startSideJob, MISSIONS, SIDE_JOBS } from './missions.js';
+import { createAudio, } from './audio.js';
+import { createHud, renderMapPanel } from './hud.js';
+import { createRenderer } from './render.js';
+import { freshPlayerState, RADIO_STATIONS, CLOCK_START_SECONDS, CLOCK_RATE, MUTTERINGS, PED_LINES, CAR_DEFS } from './config.js';
+import { makeRng, clamp, dist2d, angleDelta, formatClock } from './rng.js';
+import { freshStats, snapshotGame, applySnapshot, writeSlot, readSlot, clearAllSlots, slotSummary } from './save.js';
+import { stageShot } from './shots.js';
 
-const canvas = document.getElementById('game');
-const statusEl = document.getElementById('sr-status');
+const GAME_SEED = 7;
 
-function setStatus(text) {
-  if (statusEl) statusEl.textContent = text;
-}
+/** Build the whole game and boot it. Called once from index.html's load. */
+export function createGame(canvas, doc) {
+  const rng = makeRng(GAME_SEED * 7919 + 13);
+  const world = buildWorld(GAME_SEED);
+  const player = createPlayer(freshPlayerState());
+  const police = createPolice();
+  const missions = createMissions();
+  const audio = createAudio();
+  const hud = createHud(doc);
+  const renderer = createRenderer(canvas);
 
-const params = new URLSearchParams(window.location.search);
-const seed = Number(params.get('seed') ?? 1) || 1;
-const shot = params.get('shot');
+  const game = {
+    world, player, police, missions, audio, hud, renderer, rng,
+    roads: { avenues: [], streets: [] },
+    landmarks: {},
+    state: 'title',
+    clockSeconds: CLOCK_START_SECONDS,
+    hourOverride: null,
+    stats: freshStats(),
+    pickups: [],
+    pendingMission: null,
+    wheelOpen: false,
+    camera: { distance: 15, height: 7, yaw: -Math.PI / 2 },
+    input: { keys: new Set(), cameraYaw: -Math.PI / 2, dragging: false, lastX: 0, lastY: 0, moved: 0 },
+    time: 0,
+    playSeconds: 0,
+    shotMode: null,
+  };
 
-window.addEventListener('error', (e) => {
-  window.__shotError = String(e.message || e.error);
-  setStatus('Error: ' + (e.message || e.error));
-});
+  // Roads and landmarks are read from the config through the world module's data.
+  game.roads.avenues = [
+    { x: -360 }, { x: -240 }, { x: -120 }, { x: 0 }, { x: 120 }, { x: 240 }, { x: 360 },
+  ];
+  game.roads.streets = [
+    { z: -360 }, { z: -240 }, { z: -120 }, { z: 0 }, { z: 120 }, { z: 240 }, { z: 360 },
+  ];
+  game.landmarks = {
+    pasarMalam: { x: 0, z: 0 }, gangSanca: { x: -180, z: -60 },
+    lighthouse: { x: -418, z: -360 }, harbour: { x: 120, z: 415 },
+    hospital: { x: 240, z: -240 }, garage: { x: -60, z: 180 },
+    markas: { x: 300, z: 300 }, pantai: { x: -400, z: 60 },
+    stasiun: { x: 180, z: -180 }, alunAlun: { x: 60, z: 60 },
+  };
 
-let game;
-try {
-  game = new Game(canvas, { seed, shot });
-} catch (e) {
-  window.__shotError = String(e && e.message ? e.message : e);
-  setStatus('Failed to start: ' + (e && e.message ? e.message : e));
-  throw e;
-}
-window.__game = game;
-// Debug handle for the shot tooling: which shot and seed staged this page.
-window.__shotInfo = { shot: shot ?? null, seed };
+  // ----- helpers the other modules call back into -----
 
-// ---- Deterministic shot staging ---------------------------------------
-// Each shot puts the world in a fixed state, runs the simulation a fixed
-// number of steps, then freezes it so the captured frame is the same every
-// time. The game still plays normally without a ?shot param.
+  game.setDialogue = (line, keep) => hud.setDialogue(line, keep);
+  game.showBanner = (title, sub) => hud.showBanner(title, sub);
+  game.addWanted = (amount, reason) => {
+    const level = addWanted(police, amount, reason);
+    if (reason) hud.flashCrime(reason);
+    return level;
+  };
+  game.setWanted = (level) => {
+    police.heat = level;
+    police.wanted = level;
+  };
+  game.clearWanted = () => clearWanted(police, world);
+  game.audioStationName = () => {
+    const st = RADIO_STATIONS[audio.station];
+    return `${st.name} · ${st.freq}`;
+  };
+  game.clockText = () => {
+    const h = Math.floor(game.clockSeconds / 3600) % 24;
+    const m = Math.floor(game.clockSeconds / 60) % 60;
+    return `${String(h).padStart(2, '0')}:${String(m).padStart(2, '0')}`;
+  };
+  game.playTimeText = () => formatClock(game.stats.playSeconds);
+  game.streetName = () => streetNameAt(player.x, player.z);
+  game.policeDistances = () => policeDistances(world, player);
+  game.readSaveSlot = (slot) => slotSummary(slot);
+  game.setHour = (hour) => {
+    game.hourOverride = hour;
+    // Keep the HUD clock in step with the staged hour of day.
+    game.clockSeconds = hour * 3600;
+  };
+  game.currentHour = () => (game.hourOverride !== null ? game.hourOverride : (game.clockSeconds / 3600) % 24);
 
-function fixedSteps(n, drive) {
-  for (let i = 0; i < n; i++) {
-    if (drive) drive(i);
-    game.update(1 / 60);
+  Object.defineProperty(game, 'marker', {
+    get() { return currentMarker(missions, game); },
+  });
+  Object.defineProperty(game, 'nearCar', {
+    get() {
+      if (!player.onFoot) return null;
+      return nearestCar(player, world.parked.concat(world.traffic), 4.5);
+    },
+  });
+  Object.defineProperty(game, 'nearJob', {
+    get() { return nearbySideJob(missions, player); },
+  });
+
+  game.allCars = () => world.traffic.concat(world.parked, world.policeCars).concat(player.car ? [player.car] : []);
+  game.enemiesAlive = () => world.enemies.filter((e) => e.hp > 0);
+
+  game.spawnEnemy = (x, z, name, hp) => {
+    const e = {
+      x, z, angle: 0, hp, maxHp: hp, name,
+      skin: [0.8, 0.6, 0.45], attackTimer: 0, speed: 3.4,
+    };
+    world.enemies.push(e);
+    return e;
+  };
+  game.clearEnemies = () => { world.enemies = []; };
+  game.spawnPickup = (x, z, name) => {
+    const pk = { x, z, name, taken: false, bob: rng.range(0, Math.PI * 2) };
+    game.pickups.push(pk);
+    return pk;
+  };
+  game.clearPickups = () => { game.pickups = []; };
+
+  game.damageEnemy = (enemy, amount, how) => {
+    enemy.hp -= amount;
+    if (enemy.hp <= 0) {
+      enemy.hp = 0;
+      const act = missions.active;
+      if (act && act.mission.stages[act.stageIndex].type === 'defeat') {
+        act.progress += 1;
+      }
+      if (rng.chance(0.35)) giveAmmo(player, rng.pick(['pistol', 'shotgun']), rng.pick([4, 6]));
+      game.setDialogue(`Raka: Satu ${enemy.name} tumbang.`);
+    }
+  };
+
+  game.damagePlayer = (amount, _unused, source) => {
+    if (player.dead || game.state !== 'playing') return;
+    if (player.hurtTimer > 0) return;
+    player.hurtTimer = 0.4;
+    let rest = amount;
+    if (player.armour > 0) {
+      const absorbed = Math.min(player.armour, rest);
+      player.armour -= absorbed;
+      rest -= absorbed;
+    }
+    player.health -= rest;
+    if (player.health <= 0) {
+      player.health = 0;
+      player.dead = true;
+      game.state = 'dead';
+      showScreen('dead');
+      audio.failSting();
+    }
+  };
+
+  game.spawnFleeingDriver = (car) => {
+    const ped = {
+      id: `driver-${Date.now()}`, x: car.x + 2, z: car.z + 2,
+      angle: rng.angle(), speed: 4, skin: [0.7, 0.5, 0.35],
+      shirt: [0.9, 0.2, 0.2], state: 'panic', panic: 4,
+      wanderTimer: 0, targetX: 0, targetZ: 0, line: null, lineTimer: 0,
+    };
+    world.pedestrians.push(ped);
+    game.setDialogue('Sopir: Hei! Itu mobilku! Tolong!');
+  };
+
+  game.nearestParkedCar = (maxDist) => nearestCar(player, world.parked, maxDist || 30);
+
+  game.stealCarSilently = (car) => {
+    car.owner = 'player';
+    player.car = car;
+    player.onFoot = false;
+    player.x = car.x; player.z = car.z; player.angle = car.angle;
+  };
+
+  game.ensureVehicleNear = (x, z, defId) => {
+    const def = CAR_DEFS[defId] || CAR_DEFS.sedan;
+    const found = world.parked.find((c) => c.defId === defId && dist2d(c.x, c.z, x, z) < 40);
+    if (found) return found;
+    const car = {
+      id: `mission-${defId}`, def, defId,
+      x: x + 4, z: z + 4, angle: Math.PI / 2, speed: 0,
+      colour: def.colours[0], owner: 'parked', hp: 100,
+    };
+    world.parked.push(car);
+    return car;
+  };
+
+  // ----- screens -----
+
+  const screens = {
+    title: doc.getElementById('title'),
+    pause: doc.getElementById('pause'),
+    map: doc.getElementById('mapOverlay'),
+    dead: doc.getElementById('dead'),
+    busted: doc.getElementById('busted'),
+  };
+  function showScreen(name) {
+    for (const key of Object.keys(screens)) {
+      if (screens[key]) screens[key].classList.toggle('show', key === name);
+    }
+    if (doc.getElementById('hud')) doc.getElementById('hud').classList.toggle('dim', name === 'title');
   }
-}
 
-// Autopilot that holds an eastbound car on its road: steer toward the
-// centreline (heading PI/2 = east; too far south needs heading > PI/2,
-// i.e. positive steer) plus a small weave. A bare sine weave drifts off
-// the 10-unit road and into the blocks — the v1 drive shot did exactly
-// that, ending on the sand.
-function roadPilot(car, targetZ, i, colliders, allCars) {
-  const steer = clamp((car.z - targetZ) * 0.06, -0.5, 0.5) + Math.sin(i / 20) * 0.08;
-  driveCar(car, 1, steer, 1 / 60, colliders, allCars);
-}
+  game.newGame = () => {
+    clearAllSlots();
+    const fresh = createPlayer(freshPlayerState());
+    Object.assign(player, fresh);
+    player.ammo = { pistol: 24, shotgun: 8 };
+    Object.assign(police, createPolice());
+    Object.assign(missions, createMissions());
+    game.stats = freshStats();
+    game.pickups = [];
+    game.pendingMission = null;
+    game.clockSeconds = CLOCK_START_SECONDS;
+    game.hourOverride = null;
+    game.state = 'playing';
+    world.policeCars = [];
+    world.helicopter = null;
+    world.roadblocks = [];
+    world.enemies = [];
+    game.input.cameraYaw = player.angle;
+    showScreen(null);
+    startMission(missions, 0, game);
+    audio.unlock();
+  };
 
-// Lay out a shot's own traffic in the two lanes of a road: eastbound cars
-// at z - 4, westbound at z + 4, all offset from the player's centreline so
-// nobody side-swipes the hero car mid-shot.
-function stageTraffic(cars) {
-  for (const [model, x, z, heading] of cars) {
-    const t = createCar(model, x, z, heading, null, 'traffic');
-    t.node = -1;
-    game.cars.push(t);
+  game.continueGame = () => {
+    const save = readSlot(1);
+    if (!save) return false;
+    Object.assign(player, createPlayer(freshPlayerState()));
+    Object.assign(police, createPolice());
+    Object.assign(missions, createMissions());
+    game.stats = freshStats();
+    game.pickups = [];
+    applySnapshot(game, save);
+    game.state = 'playing';
+    showScreen(null);
+    game.setDialogue('Raka: Lanjutkan dari mana kemarin berhenti.');
+    audio.unlock();
+    return true;
+  };
+
+  game.saveGame = (slot) => {
+    const ok = writeSlot(slot, snapshotGame(game));
+    if (ok) game.setDialogue(`Raka: Tersimpan di slot ${slot}.`);
+    return ok;
+  };
+
+  game.openMap = () => {
+    game.state = 'map';
+    renderMapPanel(doc, game);
+    showScreen('map');
+  };
+  game.closeMap = () => {
+    game.state = 'playing';
+    showScreen(null);
+  };
+  game.pauseGame = () => {
+    if (game.state !== 'playing') return;
+    game.state = 'paused';
+    showScreen('pause');
+  };
+  game.resumeGame = () => {
+    if (game.state !== 'paused') return;
+    game.state = 'playing';
+    showScreen(null);
+  };
+
+  // ----- input -----
+
+  function onKeyDown(e) {
+    if (e.repeat) return;
+    audio.unlock();
+    game.input.keys.add(e.code);
+    if (game.state === 'title') {
+      if (e.code === 'Enter') game.newGame();
+      return;
+    }
+    if (e.code === 'Escape' || e.code === 'KeyP') {
+      if (game.state === 'map') game.closeMap();
+      else if (game.state === 'playing') game.pauseGame();
+      else if (game.state === 'paused') game.resumeGame();
+      return;
+    }
+    if (e.code === 'KeyM' && game.state === 'map') { game.closeMap(); return; }
+    if (game.state !== 'playing') return;
+    if (e.code === 'KeyM') { game.openMap(); return; }
+    if (e.code === 'KeyE') {
+      if (player.onFoot) {
+        const car = game.nearCar;
+        if (car) stealCar(player, car, game);
+      } else {
+        exitCar(player, world);
+        audio.setEngine(0, false);
+      }
+      return;
+    }
+    if (e.code === 'KeyF') { punch(player, game); return; }
+    if (e.code === 'KeyQ') {
+      game.wheelOpen = !game.wheelOpen;
+      if (game.wheelOpen) cycleWeapon(player);
+      return;
+    }
+    if (e.code === 'Digit1') { selectWeapon(player, 0); game.wheelOpen = false; return; }
+    if (e.code === 'Digit2') { selectWeapon(player, 1); game.wheelOpen = false; return; }
+    if (e.code === 'Digit3') { selectWeapon(player, 2); game.wheelOpen = false; return; }
+    if (e.code === 'KeyR') {
+      const st = audio.nextStation();
+      game.setDialogue(`Radio: ${RADIO_STATIONS[st].name} — ${RADIO_STATIONS[st].blurb}`);
+      return;
+    }
+    if (e.code === 'KeyH') { audio.horn(); return; }
+    if (e.code === 'KeyJ') {
+      const job = game.nearJob;
+      if (job) startSideJob(missions, job.id, game);
+      return;
+    }
+    if (e.code === 'Enter') {
+      if (game.pendingMission !== null && game.pendingMission !== undefined) {
+        startPendingMission(missions, game);
+      }
+      return;
+    }
   }
-}
-
-// Remove the random traffic from a stretch of road around (x, z), so the
-// staged traffic is the only traffic the camera sees.
-function clearTrafficNear(x, z, radius) {
-  game.cars = game.cars.filter((c) => c.owner !== 'traffic' || Math.hypot(c.x - x, c.z - z) > radius);
-}
-
-function stageShot(kind) {
-  game.state = 'playing';
-  game.hud.hideMenu();
-  const R = game.rng;
-  if (kind === 'title') {
-    game.state = 'title';
-    game.time = 12; // late-afternoon light on the title orbit
-    // The title menu from the constructor was hidden by stageShot's prologue;
-    // show it again over the city backdrop.
-    game.hud.showTitle(true, () => {});
-    // Park a hero car on the beach road for the title backdrop.
-    const car = createCar('sport', -120, 252, 2.4, [0.9, 0.15, 0.15], 'parked');
-    game.cars.push(car);
-    return;
+  function onKeyUp(e) {
+    game.input.keys.delete(e.code);
   }
-  if (kind === 'chase') {
-    // COVER: golden-hour chase east along Jalan Pantai (z = 240). Raka in a
-    // Panther GT, wanted 4, helicopter overhead, patrol cars and traffic on
-    // the road, warung crowds on the sidewalk. Heading PI/2 drives +x, i.e.
-    // along the road — the v1 drive shot drove +z, off the road onto sand.
-    game.setLighting('golden');
-    game.dayMinutes = 17 * 60 + 48; // 17:48, golden hour
-    game.missions.startMission(5); // m6 "Malam di Tanjung": survive the heat
-    game.missions.banner = null; // keep the transient title banner out of the frozen frame
-    game.police.addHeat(80, 'Kejaran bintang 4 di Jalan Pantai');
-    const car = createCar('sport', -60, 240, Math.PI / 2, [0.9, 0.15, 0.15], 'player');
-    car.engine = 1;
-    game.cars.push(car);
-    game.playerCar = car;
-    game.player.x = car.x;
-    game.player.z = car.z;
-    game.missions.objective = 'Kabur dari kejaran bintang 4 di Jalan Pantai';
-    clearTrafficNear(-60, 240, 90);
-    stageTraffic([
-      ['sedan', 15, 236, Math.PI / 2], ['taxi', 55, 236, Math.PI / 2], ['van', 100, 236, Math.PI / 2],
-      ['hatch', 20, 244, -Math.PI / 2], ['bajaj', 65, 244, -Math.PI / 2], ['sedan', -35, 244, -Math.PI / 2],
-    ]);
-    // Sidewalk crowd by the warung carts, plus two vendors standing at
-    // their carts watching the chase go past.
-    spawnCrowd(game.peds, 10, 250, 6, R);
-    spawnStanders(game.peds, [[-36, 249, Math.PI], [36, 249, Math.PI]], R);
-    fixedSteps(120, (i) => {
-      const c = game.playerCar;
-      if (c) roadPilot(c, 240, i, game.city.colliders, game.allCars);
+  doc.addEventListener('keydown', onKeyDown);
+  doc.addEventListener('keyup', onKeyUp);
+
+  canvas.addEventListener('mousedown', (e) => {
+    audio.unlock();
+    game.input.dragging = true;
+    game.input.lastX = e.clientX;
+    game.input.lastY = e.clientY;
+    game.input.moved = 0;
+  });
+  canvas.addEventListener('mousemove', (e) => {
+    if (!game.input.dragging) return;
+    const dx = e.clientX - game.input.lastX;
+    const dy = e.clientY - game.input.lastY;
+    game.input.lastX = e.clientX;
+    game.input.lastY = e.clientY;
+    game.input.moved += Math.abs(dx) + Math.abs(dy);
+    game.input.cameraYaw -= dx * 0.005;
+    game.camera.height = clamp(game.camera.height + dy * 0.03, 4, 14);
+  });
+  canvas.addEventListener('mouseup', (e) => {
+    game.input.dragging = false;
+    if (game.state === 'playing' && game.input.moved < 6) {
+      if (player.weapon === 'fists') punch(player, game);
+      else shoot(player, game);
+    }
+  });
+
+  // Menu buttons.
+  doc.querySelectorAll('button[data-a]').forEach((btn) => {
+    btn.addEventListener('click', () => {
+      audio.unlock();
+      audio.click();
+      const action = btn.getAttribute('data-a');
+      if (action === 'new') game.newGame();
+      else if (action === 'continue') {
+        if (!game.continueGame()) game.setDialogue('Belum ada simpanan di slot 1.');
+      } else if (action === 'howto') {
+        const help = doc.getElementById('howto');
+        if (help) help.classList.toggle('show');
+      } else if (action === 'save') game.saveGame(1);
+      else if (action === 'resume') game.resumeGame();
+      else if (action === 'quit') { game.state = 'title'; showScreen('title'); }
+      else if (action === 'close-map') game.closeMap();
+      else if (action === 'respawn') {
+        player.dead = false;
+        player.health = 100;
+        player.money = Math.max(0, player.money - 200);
+        player.x = game.landmarks.hospital.x + 12;
+        player.z = game.landmarks.hospital.z + 12;
+        player.onFoot = true;
+        player.car = null;
+        game.clearWanted();
+        game.state = 'playing';
+        showScreen(null);
+        game.setDialogue('Raka: Sakit… tapi belum mati. Rumah sakit lagi.');
+      } else if (action === 'busted-ok') {
+        resolveBust(police, player, world, game);
+        game.state = 'playing';
+        showScreen(null);
+      }
     });
-    // Pose the chase for the frame: two patrol cars head-on ahead in both
-    // lanes, helicopter low and ahead so it is actually in the frame.
-    const px = game.playerCar.x;
-    const pz = game.playerCar.z;
-    if (game.police.cops[0]) {
-      const c = game.police.cops[0];
-      c.x = px + 34;
-      c.z = 236;
-      c.heading = -Math.PI / 2;
-      c.speed = 12;
-    }
-    if (game.police.cops[1]) {
-      const c = game.police.cops[1];
-      c.x = px + 55;
-      c.z = 244;
-      c.heading = -Math.PI / 2;
-      c.speed = 12;
-    }
-    game.police.heli = { x: px + 32, z: pz + 28, y: 13, angle: 0.5 };
-    game.refreshHud();
-    game.shotFrozen = true;
-    return;
-  }
-  if (kind === 'mission') {
-    // Golden-hour fight in the market: Raka on foot, pistol out, Gang Sanca
-    // closing in — two already down, so the HUD counter reads "Usir 2/5".
-    // Uses the real mission (m7 "Perang Gang"), not hand-placed actors.
-    game.setLighting('golden');
-    game.dayMinutes = 17 * 60 + 20; // 17:20, low sun over the market
-    game.player.x = -2;
-    game.player.z = 10;
-    game.player.heading = Math.PI;
-    game.camera.yaw = Math.PI;
-    game.weapons.current = 'pistol';
-    game.weapons.hasShotgun = true;
-    game.missions.startMission(6); // m7, stage 1: defeat 5 gang at market
-    game.missions.banner = null; // keep the transient title banner out of the frozen frame
-    // Market shoppers caught in the fight.
-    spawnCrowd(game.peds, 24, 18, 5, R);
-    // A parked hero car and a taxi for street life.
-    const taxi = createCar('taxi', 12, 14, 1.2, null, 'traffic');
-    game.cars.push(taxi);
-    fixedSteps(90);
-    // Two gang members already down: mid-fight, counter at 2/5.
-    const gang = game.missions.spawnedPeds;
-    for (let i = 0; i < 2 && i < gang.length; i++) {
-      gang[i].dead = true;
-      gang[i].deadAt = game.time;
-    }
-    game.player.health = 82;
-    game.player.armour = 40;
-    game.money = 1250;
-    game.refreshHud(); // sync the DOM counter ("Usir 2/5") and vitals
-    game.shotFrozen = true;
-    return;
-  }
-  if (kind === 'drive') {
-    // Night drive: Raka in the gold Panther GT on Jalan Merdeka (z = 200),
-    // wanted 2, lamps and headlights carrying the scene.
-    game.setLighting('night');
-    game.dayMinutes = 21 * 60 + 30; // 21:30
-    const car = createCar('sport', -120, 200, Math.PI / 2, [0.95, 0.8, 0.15], 'player');
-    car.engine = 1;
-    game.cars.push(car);
-    game.playerCar = car;
-    game.player.x = car.x;
-    game.player.z = car.z;
-    game.police.addHeat(40, 'Tersangka melaju di Jalan Merdeka');
-    game.missions.objective = 'Jelajahi Jalan Merdeka di malam hari';
-    game.missions.marker = { x: 120, z: 200, radius: 9, label: 'Jalan Merdeka' };
-    clearTrafficNear(-120, 200, 90);
-    stageTraffic([
-      ['sedan', 10, 196, Math.PI / 2], ['taxi', 55, 196, Math.PI / 2], ['bajaj', 95, 196, Math.PI / 2],
-      ['hatch', 0, 204, -Math.PI / 2], ['van', 50, 204, -Math.PI / 2],
-    ]);
-    spawnCrowd(game.peds, -40, 208, 5, R);
-    fixedSteps(150, (i) => {
-      const c = game.playerCar;
-      if (c) roadPilot(c, 200, i, game.city.colliders, game.allCars);
-    });
-    game.refreshHud();
-    game.shotFrozen = true;
-    return;
-  }
-  if (kind === 'map') {
-    // The map screen: golden-hour city behind the panel, 5 of 8 missions
-    // done, 4 of 12 statues found, slot 1 holding a real save made here.
-    game.setLighting('golden');
-    game.dayMinutes = 17 * 60 + 48;
-    game.money = 2450;
-    game.respect = 87;
-    game.missions.done = ['m1', 'm2', 'm3', 'm4', 'm5'];
-    game.missions.index = 5;
-    game.missions.objective = 'Misi 6: Malam di Tanjung menanti.';
-    for (let i = 0; i < 4; i++) game.statues[i].taken = true;
-    fixedSteps(30);
-    saveGame(game.saveState(), 1);
-    game.toggleMap();
-    game.shotFrozen = true;
-    return;
-  }
-  if (kind === 'city') {
-    // Wide postcard view: handled by the camera in render(). Settle the
-    // world, then park a few cars on the beach road for the foreground.
-    game.time = 30;
-    fixedSteps(60);
-    const postcard = createCar('sport', -40, 244, Math.PI / 2, [0.9, 0.15, 0.15], 'parked');
-    game.cars.push(postcard);
-    game.shotFrozen = true;
-    return;
-  }
-}
+  });
 
-// ---- Main loop ----
-let last = performance.now();
-let frames = 0;
+  // ----- simulation step -----
 
-function frame(now) {
-  const dt = Math.min(0.05, (now - last) / 1000);
-  last = now;
-  frames++;
-  try {
-    if (game.state === 'title') game.time += dt;
-    if (!game.shotFrozen) game.update(dt);
-    game.render();
-  } catch (e) {
-    window.__shotError = String(e && e.message ? e.message : e);
-    setStatus('Error: ' + (e && e.message ? e.message : e));
-  }
-  if (shot && frames === 3) window.__shotReady = true;
-  requestAnimationFrame(frame);
-}
+  game.stepGame = (dt) => {
+    game.time += dt;
+    game.clockSeconds += dt * CLOCK_RATE;
+    game.stats.playSeconds += dt;
+    const hour = game.currentHour();
 
-if (shot) {
-  try {
-    stageShot(shot);
-    setStatus(`Tanjung Matahari — shot ${shot}`);
-  } catch (e) {
-    window.__shotError = String(e && e.message ? e.message : e);
+    // Player movement.
+    if (game.state === 'playing' || game.shotMode) {
+      if (player.onFoot) stepOnFoot(player, world, game.input, dt);
+      else stepDriving(player, world, game.input, dt, game);
+    }
+
+    // World life.
+    stepTraffic(world, dt, rng);
+    stepPedestrians(world, dt, player, rng);
+    stepPolice(police, world, player, dt, game);
+
+    // Enemies chase and attack.
+    for (const e of world.enemies) {
+      if (e.hp <= 0) continue;
+      const d = dist2d(e.x, e.z, player.x, player.z);
+      if (d < 45) {
+        e.angle = Math.atan2(player.x - e.x, player.z - e.z);
+        if (d > 2.2) {
+          const moved = { x: e.x + Math.sin(e.angle) * e.speed * dt, z: e.z + Math.cos(e.angle) * e.speed * dt };
+          e.x = moved.x; e.z = moved.z;
+        } else if (e.attackTimer <= 0) {
+          e.attackTimer = 0.9;
+          game.damagePlayer(9, 0, e.name);
+          game.setDialogue(`${e.name}: Rasakan ini, Raka!`);
+        }
+      }
+      if (e.attackTimer > 0) e.attackTimer -= dt;
+    }
+
+    // Pickups and collectibles.
+    for (const pk of game.pickups) {
+      if (!pk.taken && dist2d(player.x, player.z, pk.x, pk.z) < 2.6) {
+        pk.taken = true;
+        const act = missions.active;
+        if (act && act.mission.stages[act.stageIndex].type === 'collect') act.progress += 1;
+        audio.cash();
+      }
+    }
+    for (const c of world.collectibles) {
+      if (!c.taken && dist2d(player.x, player.z, c.x, c.z) < 2.2) {
+        c.taken = true;
+        player.money += 100;
+        audio.cash();
+        game.setDialogue('Raka: Keris emas! Koleksi 1 dari 12.');
+      }
+    }
+
+    // Missions and side jobs.
+    if (game.state === 'playing' || game.shotMode) {
+      stepMissions(missions, game, dt);
+      stepSideJob(missions, game, dt);
+    }
+
+    // Free-roam mutterings.
+    player.mutterTimer -= dt;
+    if (player.mutterTimer <= 0 && game.state === 'playing' && !missions.active) {
+      player.mutterTimer = 22;
+      game.setDialogue(`Raka: ${rng.pick(MUTTERINGS)}`);
+    }
+    // Pedestrian chatter when bumped.
+    for (const ped of world.pedestrians) {
+      if (ped.lineTimer <= 0 && dist2d(ped.x, ped.z, player.x, player.z) < 2) {
+        ped.line = rng.pick(PED_LINES);
+        ped.lineTimer = 3;
+        game.setDialogue(`Warga: ${ped.line}`);
+      }
+    }
+
+    // Busted?
+    if (police.busted && game.state === 'playing') {
+      game.state = 'busted';
+      showScreen('busted');
+    }
+
+    // Engine sound follows driving; quiet on foot.
+    if (!player.car) audio.setEngine(0, false);
+
+    // Camera: ease toward the car heading while driving.
+    if (player.car) {
+      game.input.cameraYaw += clamp(angleDelta(game.input.cameraYaw, player.car.angle), -1.4 * dt, 1.4 * dt);
+    }
+  };
+
+  // ----- rendering -----
+
+  game.renderFrame = () => {
+    const hour = game.currentHour();
+    let camX; let camY; let camZ; let tx; let ty; let tz;
+    if (game.state === 'title') {
+      // Slow orbit around the alun-alun behind the title screen.
+      const a = game.time * 0.05;
+      camX = 60 + Math.cos(a) * 90;
+      camY = 55;
+      camZ = 60 + Math.sin(a) * 90;
+      tx = 60; ty = 4; tz = 60;
+    } else {
+      const yaw = game.input.cameraYaw;
+      const dist = game.camera.distance;
+      const height = game.camera.height;
+      const fx = Math.sin(yaw);
+      const fz = Math.cos(yaw);
+      camX = player.x - fx * dist;
+      camY = height + (player.car ? 1.5 : 0);
+      camZ = player.z - fz * dist;
+      tx = player.x + fx * 8;
+      ty = 2;
+      tz = player.z + fz * 8;
+    }
+    if (renderer) {
+      try {
+        renderer.draw(game, { x: camX, y: camY, z: camZ, tx, ty, tz }, hour, game.time);
+      } catch (err) {
+        window.__shotError = String(err && err.message ? err.message : err);
+      }
+    }
+    if (game.state === 'playing' || game.shotMode) hud.update(game, 1 / 60);
+  };
+
+  // ----- main loop -----
+
+  let last = performance.now();
+  function loop(now) {
+    const dt = clamp((now - last) / 1000, 0, 0.05);
+    last = now;
+    if (game.state !== 'title' || game.time < 0.1) game.stepGame(dt);
+    else game.time += dt;
+    game.renderFrame();
+    window.requestAnimationFrame(loop);
   }
-  // Give the renderer a few frames, then signal readiness for the screenshot.
-  requestAnimationFrame(frame);
-} else {
-  setStatus('Tanjung Matahari — tekan tombol untuk mulai');
-  requestAnimationFrame(frame);
+
+  // ----- boot -----
+
+  const params = new URLSearchParams(window.location.search);
+  const shot = params.get('shot');
+  if (shot) {
+    game.shotMode = shot;
+    game.state = 'playing';
+    showScreen(null);
+    stageShot(shot, game);
+  } else {
+    showScreen('title');
+    const cont = doc.querySelector('button[data-a="continue"]');
+    if (cont && !readSlot(1)) cont.setAttribute('disabled', 'disabled');
+  }
+  if (!renderer) {
+    window.__shotError = 'WebGL2 tidak tersedia di browser ini';
+  }
+  window.__game = game;
+  window.requestAnimationFrame(loop);
+  return game;
 }

@@ -1,512 +1,436 @@
-// missions.js — the story of Raka, driver of Tanjung Matahari.
+// missions.js — The story of Raka and the eight missions of Tanjung Matahari.
 //
-// Eight staged missions across three chapters, plus repeatable side jobs
-// (taxi, delivery, street race). Every stage has one clear objective shown
-// on screen, a counter when it counts things, and a spoken line from Raka
-// while it runs.
+// Three chapters, eight missions, one arc: Raka arrives broke in Tanjung
+// Matahari, owes the Gang Sanca, works his way up through the night market,
+// and finally takes the gang's harbour stronghold and escapes to the
+// lighthouse. Each mission is a list of stages; a stage is one of:
+//   reach  — stand inside the small yellow diamond marker
+//   defeat — beat a number of named enemies (counter shown as "Usir 2/5")
+//   collect — pick up a number of glowing items
+//   drive  — take a specific car to a place
+//   survive — stay alive (and keep the wanted level) for N seconds
+//   enter  — get into any car (or a specific one)
+// The engine tracks the active stage, counts progress, plays the jingle on
+// completion, pays the reward and unlocks the next mission. Side jobs
+// (ojek, paket, taksi) are small repeatable missions started with J near
+// their markers. Dialogue is picked from alternate lines so a replayed
+// mission does not sound identical.
 
-import { dist2D } from './math.js';
+import { LANDMARKS } from './config.js';
+import { dist2d } from './rng.js';
 
-export const CHAPTERS = ['Bab 1 — Sopir Baru', 'Bab 2 — Nama di Jalanan', 'Bab 3 — Juragan Tanjung'];
-
-// Stage types:
-//  goto      {loc, radius}            walk/drive to a place
-//  steal     {model, loc}             get into the marked car
-//  deliver   {loc, radius, time?}     reach a place (optional timer)
-//  race      {points:[{x,z}], time?}  drive through checkpoints in order
-//  collect   {loc, count}             pick up N crates with E
-//  defeat    {loc, count, role}       defeat N hostiles at a place
-//  survive   {seconds, wanted}        hold the wanted level for a time
-//  escape    {loc, radius, wanted}    reach a place while still wanted
-
+/** The eight story missions, in order. */
 export const MISSIONS = [
   {
-    id: 'm1', chapter: 0, title: 'Kunci Pertama',
-    briefing: 'Bengkel Tanjung butuh mobil. Ambil sedan di Pasar Malam dan antar ke bengkel. Jangan sampai ketahuan.',
-    reward: { money: 250, respect: 10 },
+    id: 'm1', chapter: 1, title: 'Sambutan Raka',
+    briefing: 'Raka baru sampai di Tanjung Matahari dengan Rp 300 di saku. Sari menunggunya di Pasar Malam.',
     stages: [
-      { type: 'goto', loc: 'market', radius: 10, text: 'Pergi ke Pasar Malam' },
-      { type: 'steal', model: 'sedan', loc: 'market', text: 'Curi sedan yang ditandai (E untuk masuk)' },
-      { type: 'deliver', loc: 'garage', radius: 8, text: 'Antar mobil ke Bengkel Tanjung' },
+      { type: 'reach', x: LANDMARKS.pasarMalam.x, z: LANDMARKS.pasarMalam.z, radius: 8, label: 'Temui Sari di Pasar Malam' },
+    ],
+    reward: 300,
+    dialogue: [
+      'Sari: Raka! Akhirnya sampai juga. Kota ini keras — tapi kau lebih keras.',
+      'Raka: Aku tidak datang untuk kalah, Sari. Aku datang untuk menang.',
+    ],
+    altDialogue: [
+      'Sari: Jalanan Tanjung tidak ramah, Raka. Jaga dirimu.',
+      'Raka: Tenang. Aku sudah hafal semua gang di kota ini.',
     ],
   },
   {
-    id: 'm2', chapter: 0, title: 'Antar Cepat',
-    briefing: 'Paket penting harus sampai ke Pelabuhan dalam 100 detik. Gaspol, tapi jangan tabrak polisi.',
-    reward: { money: 350, respect: 12 },
+    id: 'm2', chapter: 1, title: 'Utang Gang Sanca',
+    briefing: 'Preman Gang Sanca menagih utang lama di gang belakang pasar. Usir mereka berlima.',
     stages: [
-      { type: 'goto', loc: 'market', radius: 8, text: 'Ambil paket di Pasar Malam' },
-      { type: 'deliver', loc: 'harbor', radius: 10, time: 100, text: 'Antar paket ke Pelabuhan (100 detik)' },
+      { type: 'defeat', count: 5, x: LANDMARKS.gangSanca.x, z: LANDMARKS.gangSanca.z, radius: 26, label: 'Usir preman Gang Sanca', enemyName: 'Preman Sanca' },
+    ],
+    reward: 500,
+    dialogue: [
+      'Preman: Hei, Raka! Bos Sanca kirim salam — dan tagihan!',
+      'Raka: Tagihan? Yang kubayar cuma tinju. Lima orang, lima tinju.',
+    ],
+    altDialogue: [
+      'Preman: Kau pikir bisa lari dari utang? Gang Sanca tidak lupa!',
+      'Raka: Aku tidak lari. Aku datang menagih balik.',
     ],
   },
   {
-    id: 'm3', chapter: 0, title: 'Balap Pantai',
-    briefing: 'Anak-anak pantai menantangmu balapan. Lima gerbang di jalan pantai. Menang dan namamu naik.',
-    reward: { money: 500, respect: 18 },
+    id: 'm3', chapter: 1, title: 'Antar Paket Senja',
+    briefing: 'Sari butuh tiga paket diantar keliling kota sebelum senja. Ambil paketnya di pasar.',
     stages: [
-      { type: 'goto', loc: 'raceStart', radius: 8, text: 'Pergi ke garis start di Pantai Matahari' },
-      { type: 'race', points: [{ x: -120, z: 240 }, { x: 0, z: 240 }, { x: 120, z: 240 }, { x: 200, z: 200 }, { x: 200, z: 120 }], time: 75, text: 'Lewati 5 gerbang balapan' },
+      { type: 'collect', count: 3, x: LANDMARKS.pasarMalam.x, z: LANDMARKS.pasarMalam.z, radius: 30, label: 'Kumpulkan 3 paket di pasar', itemName: 'Paket' },
+      { type: 'reach', x: LANDMARKS.stasiun.x, z: LANDMARKS.stasiun.z, radius: 9, label: 'Antar paket ke Stasiun Tanjung' },
+    ],
+    reward: 450,
+    dialogue: [
+      'Sari: Paket-paket ini harus sampai sebelum senja. Aku percaya padamu, Raka.',
+      'Raka: Tiga paket, satu sore. Gampang.',
+    ],
+    altDialogue: [
+      'Sari: Hati-hati di Jalan Merdeka, polisi lagi razia.',
+      'Raka: Razia? Aku cuma kurir paket, Sari.',
     ],
   },
   {
-    id: 'm4', chapter: 1, title: 'Tamu Pelabuhan',
-    briefing: 'Tiga peti di dermaga harus dipindah sebelum polisi datang. Ambil semuanya, lalu kabur.',
-    reward: { money: 600, respect: 20 },
+    id: 'm4', chapter: 2, title: 'Kejar-Kejaran Pantai',
+    briefing: 'Polisi mengincar Raka di pantai. Bertahan 45 detik dalam kejar-kejaran, lalu kabur ke mercusuar.',
     stages: [
-      { type: 'goto', loc: 'harbor', radius: 10, text: 'Pergi ke Pelabuhan' },
-      { type: 'collect', loc: 'harbor', count: 3, text: 'Kumpulkan 3 peti di dermaga (E di dekat peti)' },
-      { type: 'escape', loc: 'safehouse', radius: 10, wanted: 2, text: 'Kabur dari polisi ke Rumah Aman' },
+      { type: 'survive', seconds: 45, wanted: 3, label: 'Bertahan dari kejaran polisi', x: LANDMARKS.pantai.x, z: LANDMARKS.pantai.z, radius: 60 },
+      { type: 'reach', x: LANDMARKS.lighthouse.x + 30, z: LANDMARKS.lighthouse.z + 20, radius: 10, label: 'Kabur ke Mercusuar Tanjung' },
+    ],
+    reward: 700,
+    dialogue: [
+      'Raka: Mereka pikir bisa menangkapku di pantainya sendiri? Lihat saja.',
+      'Polisi: Unit Elang, target melaju ke arah barat! Jangan sampai lolos!',
+    ],
+    altDialogue: [
+      'Raka: Pantai ini milikku. Setiap pasirnya kuhafal.',
+      'Polisi: Semua unit, tutup Jalan Pantai Barat!',
     ],
   },
   {
-    id: 'm5', chapter: 1, title: 'Utang Lama',
-    briefing: 'Penagih utang menunggu di gang Kota Tua. Selesaikan dengan tinju atau pistol. Ambil uangnya.',
-    reward: { money: 700, respect: 22 },
+    id: 'm5', chapter: 2, title: 'Rampok Truk Es',
+    briefing: 'Truk es Gang Sanca parkir di dermaga. Curi truk itu dan bawa ke pelabuhan.',
     stages: [
-      { type: 'goto', loc: 'oldtown', radius: 10, text: 'Pergi ke gang Kota Tua' },
-      { type: 'defeat', loc: 'oldtown', count: 4, role: 'collector', text: 'Kalahkan 4 penagih utang' },
-      { type: 'deliver', loc: 'home', radius: 8, text: 'Bawa uangnya pulang ke Rumah Raka' },
+      { type: 'enter', vehicle: 'truck', label: 'Curi Truk Es di dermaga', x: LANDMARKS.harbour.x - 60, z: LANDMARKS.harbour.z - 30, radius: 14 },
+      { type: 'drive', x: LANDMARKS.harbour.x, z: LANDMARKS.harbour.z, radius: 12, label: 'Bawa truk ke Pelabuhan Tanjung' },
+    ],
+    reward: 900,
+    dialogue: [
+      'Raka: Truk es… isinya bukan cuma es, kan? Bos Sanca pasti marah besar.',
+      'Sari: Bawa ke pelabuhan. Aku yang urus pembelinya.',
+    ],
+    altDialogue: [
+      'Raka: Truk sebesar ini tidak bisa hilang begitu saja. Kecuali malam ini.',
+      'Sari: Cepat, sebelum penjaga dermaga sadar.',
     ],
   },
   {
-    id: 'm6', chapter: 1, title: 'Malam di Tanjung',
-    briefing: 'Polisi sudah mengincarmu. Bertahan dengan bintang 3 dan sampai ke Rumah Aman tanpa tertangkap.',
-    reward: { money: 800, respect: 25 },
+    id: 'm6', chapter: 2, title: 'Selamatkan Sari',
+    briefing: 'Gang Sanca menculik Sari dan menyembunyikannya di stasiun. Kalahkan enam penjaga, lalu temui Sari.',
     stages: [
-      { type: 'survive', seconds: 45, wanted: 3, text: 'Bertahan 45 detik dengan bintang 3' },
-      { type: 'escape', loc: 'safehouse', radius: 10, wanted: 1, text: 'Sampai ke Rumah Aman' },
+      { type: 'defeat', count: 6, x: LANDMARKS.stasiun.x, z: LANDMARKS.stasiun.z, radius: 30, label: 'Kalahkan penjaga stasiun', enemyName: 'Penjaga Sanca' },
+      { type: 'reach', x: LANDMARKS.stasiun.x + 10, z: LANDMARKS.stasiun.z - 6, radius: 7, label: 'Selamatkan Sari' },
+    ],
+    reward: 1000,
+    dialogue: [
+      'Sari: Raka! Mereka bilang kau tidak akan datang…',
+      'Raka: Mereka salah. Aku selalu datang.',
+    ],
+    altDialogue: [
+      'Penjaga: Bos bilang, siapa pun yang datang, habisi!',
+      'Raka: Kalau begitu, habisi aku dulu.',
     ],
   },
   {
-    id: 'm7', chapter: 2, title: 'Perang Gang',
-    briefing: 'Gang Sanca menyerbu Pasar Malam. Usir mereka dari dua titik sebelum pasar hancur.',
-    reward: { money: 1000, respect: 30 },
+    id: 'm7', chapter: 3, title: 'Serbu Markas',
+    briefing: 'Waktunya membalas. Serbu markas Gang Sanca di timur kota dan kalahkan delapan anak buah Bos Sanca.',
     stages: [
-      { type: 'defeat', loc: 'market', count: 5, role: 'gang', text: 'Usir 5 anggota Gang Sanca dari Pasar Malam' },
-      { type: 'defeat', loc: 'gangHQ', count: 4, role: 'gang', text: 'Serbu markas mereka di Jalan Gang' },
+      { type: 'defeat', count: 8, x: LANDMARKS.markas.x, z: LANDMARKS.markas.z, radius: 34, label: 'Kalahkan anak buah Bos Sanca', enemyName: 'Anak Buah Sanca' },
+    ],
+    reward: 1500,
+    dialogue: [
+      'Bos Sanca: Jadi ini si Raka yang sok jago itu. Anak-anak, beri dia pelajaran!',
+      'Raka: Pelajaran hari ini: jangan pernah menculik Sari.',
+    ],
+    altDialogue: [
+      'Bos Sanca: Kota ini milikku, Raka. Kau cuma tamu yang tidak diundang.',
+      'Raka: Tamu yang akan mengambil alih rumahmu.',
     ],
   },
   {
-    id: 'm8', chapter: 2, title: 'Rampokan Terakhir',
-    briefing: 'Panther GT emas di Vila Bukit. Curi, lalu lari dari kejaran bintang 5 ke kapal di Pelabuhan.',
-    reward: { money: 2000, respect: 50 },
+    id: 'm8', chapter: 3, title: 'Pelarian Terakhir',
+    briefing: 'Seluruh kota mengejar Raka. Bertahan dengan wanted 5, lalu kabur ke mercusuar untuk mengakhiri semuanya.',
     stages: [
-      { type: 'goto', loc: 'villa', radius: 10, text: 'Pergi ke Vila Bukit' },
-      { type: 'steal', model: 'sport', loc: 'villa', text: 'Curi Panther GT emas (E untuk masuk)' },
-      { type: 'escape', loc: 'harbor', radius: 12, wanted: 5, text: 'Kabur dengan bintang 5 ke Pelabuhan' },
+      { type: 'survive', seconds: 40, wanted: 5, label: 'Bertahan dari seluruh kota', x: 0, z: 0, radius: 400 },
+      { type: 'reach', x: LANDMARKS.lighthouse.x + 30, z: LANDMARKS.lighthouse.z + 20, radius: 10, label: 'Kabur ke Mercusuar Tanjung' },
+    ],
+    reward: 2500,
+    dialogue: [
+      'Raka: Lima bintang. Seluruh kota. Tapi mercusuar itu sudah menunggu.',
+      'Sari: Sampai di mercusuar, kita bebas, Raka. Bebas!',
+    ],
+    altDialogue: [
+      'Polisi: Semua unit ke mercusuar! Target tidak boleh lolos!',
+      'Raka: Kalau ini akhir, biarlah akhir yang gemilang.',
     ],
   },
 ];
 
-export const SIDE_JOBS = {
-  taxi: { title: 'Taksi', briefing: 'Antar penumpang ke tujuannya.', reward: 120 },
-  delivery: { title: 'Kurir', briefing: 'Antar paket tepat waktu.', reward: 150 },
-  race: { title: 'Balap Liar', briefing: 'Lima gerbang, waktu tercepat menang.', reward: 200 },
+export const CHAPTER_NAMES = {
+  1: 'Bab 1 — Awal di Tanjung',
+  2: 'Bab 2 — Naik Daun',
+  3: 'Bab 3 — Bos Tanjung',
 };
 
-// Lines Raka mutters to himself while roaming free between missions.
-// The game rotates through them, one every dozen seconds, so the city
-// never feels silent even when no mission is running.
-export const FREE_ROAM_LINES = [
-  'Raka: Tanjung sore ini cantik. Sayang dompet masih tipis.',
-  'Raka: Gang Sanca pasti lagi ngintip dari gang sebelah.',
-  'Raka: Kalau ada kerjaan, taksi di Pangkalan Taksi selalu ada.',
-  'Raka: Bau sate dari Pasar Malam sampai ke sini. Lapar.',
-  'Raka: Panther GT emas itu masih nunggu di Vila Bukit.',
-  'Raka: Polisi lagi patroli. Jalan santai saja.',
-  'Raka: Pantai Matahari, balapan liar, atau kurir — pilih sendiri.',
-  'Raka: Patung Tanjung ada dua belas. Sudah ketemu berapa?',
+/** The three repeatable side jobs. */
+export const SIDE_JOBS = [
+  {
+    id: 'ojek', name: 'Ojek Kilat', pay: 220,
+    blurb: 'Antar penumpang secepatnya ke tujuannya.',
+    start: { x: LANDMARKS.alunAlun.x, z: LANDMARKS.alunAlun.z },
+    dest: { x: LANDMARKS.pantai.x + 20, z: LANDMARKS.pantai.z },
+    destName: 'Pantai Matahari',
+  },
+  {
+    id: 'paket', name: 'Antar Paket', pay: 260,
+    blurb: 'Ambil paket di pasar, antar ke pelabuhan.',
+    start: { x: LANDMARKS.pasarMalam.x, z: LANDMARKS.pasarMalam.z },
+    dest: { x: LANDMARKS.harbour.x, z: LANDMARKS.harbour.z - 20 },
+    destName: 'Pelabuhan Tanjung',
+  },
+  {
+    id: 'taksi', name: 'Taksi Senja', pay: 300,
+    blurb: 'Penumpang stasiun mau ke mercusuar. Jangan sampai terlambat.',
+    start: { x: LANDMARKS.stasiun.x, z: LANDMARKS.stasiun.z },
+    dest: { x: LANDMARKS.lighthouse.x + 30, z: LANDMARKS.lighthouse.z + 20 },
+    destName: 'Mercusuar Tanjung',
+  },
 ];
 
-// One spoken line per mission stage, shown under the objective while the
-// mission runs. Raka talks to himself; the lines are short, in Indonesian,
-// never more than a sentence.
-export const DIALOGUE = {
-  m1: [
-    'Raka: Sedan itu parkir di Pasar Malam. Ambil diam-diam.',
-    'Raka: Kuncinya masih nempel. Rezeki anak soleh.',
-    'Raka: Bengkel Tanjung tinggal lurus. Jangan bikin baret.',
-  ],
-  m2: [
-    'Raka: Paketnya sudah di tangan. Pelabuhan, 100 detik!',
-    'Raka: Jalan pantai paling cepat. Gaspol!',
-  ],
-  m3: [
-    'Raka: Garis start di Pantai Matahari. Jangan malu-maluin.',
-    'Raka: Lima gerbang. Yang paling cepat yang namanya naik.',
-  ],
-  m4: [
-    'Raka: Tiga peti di dermaga. Angkat sebelum polisi datang.',
-    'Raka: Peti terakhir. Sekarang kabur!',
-    'Raka: Bintang dua nempel terus. Rumah Aman, cepat!',
-  ],
-  m5: [
-    'Raka: Penagih utang nunggu di gang Kota Tua. Bereskan.',
-    'Raka: Empat orang. Satu-satu saja.',
-    'Raka: Uangnya sudah di tangan. Pulang, bawa ke rumah.',
-  ],
-  m6: [
-    'Raka: Tiga bintang di belakangku. Tahan 45 detik!',
-    'Raka: Bintang sudah turun. Rumah Aman tinggal sebentar lagi.',
-  ],
-  m7: [
-    'Raka: Gang Sanca menyerbu pasar. Usir mereka semua!',
-    'Raka: Markas mereka di Jalan Gang. Habiskan.',
-  ],
-  m8: [
-    'Raka: Panther GT emas di Vila Bukit. Ini rampokan terakhir.',
-    'Raka: Mobilnya sudah di tangan. Sekarang lari!',
-    'Raka: Bintang lima! Ke Pelabuhan, ke kapal. Ini akhirnya!',
-  ],
-};
+/** Create the mission tracker. */
+export function createMissions() {
+  return {
+    index: 0,               // next story mission to play
+    completed: [],          // ids of finished story missions
+    active: null,           // { mission, stageIndex, progress, timer, ... }
+    sideJob: null,          // active side job, if any
+    jobsDone: 0,
+    attempts: {},           // mission id -> attempt count (drives alt dialogue)
+    finishedStory: false,
+  };
+}
 
-// A second line for a few stages, picked once when the stage starts, so a
-// replayed mission does not always sound identical.
-export const ALT_DIALOGUE = {
-  m1: { 0: 'Raka: Pasar Malam ramai. Bagus — makin ramai, makin gampang hilang.' },
-  m3: { 0: 'Raka: Anak pantai itu sombong. Buktikan mereka salah.' },
-  m6: { 0: 'Raka: Sirene di mana-mana. Tahan, Raka, tahan.' },
-  m7: { 0: 'Raka: Pasar ini rumahku. Gang Sanca tidak boleh menang.' },
-  m8: { 1: 'Raka: Mesin Panther ini gila. Pelabuhan, aku datang!' },
-};
+/** The mission currently active, or null. */
+export function activeMission(missions) {
+  return missions.active ? missions.active.mission : null;
+}
 
-export class MissionSys {
-  constructor(city, rng) {
-    this.city = city;
-    this.rng = rng;
-    this.index = 0; // current story mission
-    this.done = [];
-    this.active = null; // {mission, stage, data}
-    this.sideJob = null;
-    this.marker = null; // {x, z, radius, label}
-    this.banner = null; // {title, sub, t}
-    this.objective = 'Buka peta misi: pergi ke penanda kuning.';
-    this.spawnedCars = [];
-    this.spawnedPeds = [];
-    this.collectibles = [];
-    this.raceIndex = 0;
-    this.timer = 0;
-    this.allComplete = false;
-    this.stageDialogue = ''; // alternate line chosen for this stage, if any
+/** Human-readable objective line for the HUD, e.g. "Usir preman Gang Sanca — 2/5". */
+export function objectiveText(missions) {
+  const a = missions.active;
+  if (!a) {
+    if (missions.finishedStory) return 'Cerita selesai — Legenda Tanjung!';
+    return 'Bebas berkeliling — tekan M untuk peta';
   }
-
-  loc(name) {
-    return this.city.locations[name];
+  const stage = a.mission.stages[a.stageIndex];
+  if (stage.type === 'defeat' || stage.type === 'collect') {
+    return `${stage.label} — ${a.progress}/${stage.count}`;
   }
-
-  showBanner(title, sub) {
-    this.banner = { title, sub, t: 0 };
+  if (stage.type === 'survive') {
+    return `${stage.label} — ${Math.max(0, Math.ceil(stage.seconds - a.timer))} dtk`;
   }
+  return stage.label;
+}
 
-  // The spoken line for the current stage, or '' when no mission runs.
-  // Free roam falls back to Raka's idle mutterings, rotated by time.
-  currentDialogue(freeRoamIndex = -1) {
-    if (!this.active) {
-      if (freeRoamIndex < 0) return '';
-      return FREE_ROAM_LINES[freeRoamIndex % FREE_ROAM_LINES.length];
-    }
-    // The stage's alternate line, when one was picked at stage start.
-    if (this.stageDialogue) return this.stageDialogue;
-    const lines = DIALOGUE[this.active.mission.id];
-    if (!lines) return '';
-    return lines[Math.min(this.active.stage, lines.length - 1)] ?? '';
-  }
+/** Mission stage label like "Misi 2/8 — Tahap 1/2". */
+export function missionStageText(missions) {
+  const a = missions.active;
+  if (!a) return missions.finishedStory ? 'Cerita Tamat' : 'Mode Bebas';
+  return `Misi ${missions.index + 1}/8 — Tahap ${a.stageIndex + 1}/${a.mission.stages.length}`;
+}
 
-  // "Usir 2/5", "Peti 1/3", "Gerbang 2/5", "43 dtk tersisa" — the counter
-  // the HUD shows next to the objective. '' when the stage has no count.
-  counterText() {
-    if (!this.active) return '';
-    const stage = this.active.mission.stages[this.active.stage];
-    if (stage.type === 'defeat') {
-      const total = this.spawnedPeds.length;
-      const down = this.spawnedPeds.filter((p) => p.dead).length;
-      return total > 0 ? `Usir ${down}/${total}` : '';
-    }
-    if (stage.type === 'collect') {
-      const total = this.collectibles.length;
-      const got = this.collectibles.filter((c) => c.taken).length;
-      return `Peti ${got}/${total}`;
-    }
-    if (stage.type === 'race') {
-      return `Gerbang ${this.raceIndex}/${stage.points.length}`;
-    }
-    if (stage.type === 'survive') {
-      return `${Math.max(0, Math.ceil(this.timer))} dtk tersisa`;
-    }
-    return '';
-  }
+/** Start a story mission by index. Spawns its stage content. */
+export function startMission(missions, index, game) {
+  const mission = MISSIONS[index];
+  if (!mission) return null;
+  missions.index = index;
+  missions.attempts[mission.id] = (missions.attempts[mission.id] ?? 0) + 1;
+  const active = {
+    mission, stageIndex: 0, progress: 0, timer: 0,
+    spawned: false, collected: 0, startWanted: 0,
+  };
+  missions.active = active;
+  const lines = missions.attempts[mission.id] > 1 ? mission.altDialogue : mission.dialogue;
+  game.setDialogue(lines[0]);
+  game.setDialogue(lines[1], true);
+  game.showBanner(`${CHAPTER_NAMES[mission.chapter]}`, mission.title);
+  prepareStage(active, game);
+  return active;
+}
 
-  // Mission list for the map screen: every story mission with its state.
-  progressList() {
-    return MISSIONS.map((m, i) => ({
-      id: m.id,
-      chapter: CHAPTERS[m.chapter],
-      title: m.title,
-      state: this.done.includes(m.id) ? 'done' : i === this.index ? 'current' : i < this.index ? 'done' : 'locked',
-    }));
-  }
-
-  // The next mission the player will play, for the map screen's
-  // "Misi Berikutnya" line. Null when the story is finished.
-  nextMission() {
-    const m = MISSIONS[this.index];
-    if (!m) return null;
-    return { chapter: CHAPTERS[m.chapter], title: m.title, briefing: m.briefing };
-  }
-
-  startMission(i) {
-    const m = MISSIONS[i];
-    if (!m) {
-      this.allComplete = true;
-      return;
-    }
-    // Set the index here, so the HUD stage line reads "Misi 6/8" while
-    // mission 6 runs — not "Misi 1/8".
-    this.index = i;
-    this.active = { mission: m, stage: 0, data: {} };
-    this.showBanner(`${CHAPTERS[m.chapter]}`, `${m.title} — ${m.briefing}`);
-    this.setupStage();
-  }
-
-  setupStage() {
-    const stage = this.active.mission.stages[this.active.stage];
-    this.timer = stage.time ?? stage.seconds ?? 0;
-    this.raceIndex = 0;
-    this.collectibles = [];
-    this.spawnedPeds = [];
-    // Pick the stage's alternate line half the time, once per stage.
-    const alt = ALT_DIALOGUE[this.active.mission.id]?.[this.active.stage];
-    this.stageDialogue = alt && this.rng.float() < 0.5 ? alt : '';
-    if (stage.type === 'goto' || stage.type === 'deliver' || stage.type === 'escape') {
-      const l = this.loc(stage.loc);
-      this.marker = { x: l.x, z: l.z, radius: stage.radius, label: l.name };
-    } else if (stage.type === 'steal') {
-      const l = this.loc(stage.loc);
-      this.marker = { x: l.x, z: l.z, radius: 8, label: 'Mobil target' };
-    } else if (stage.type === 'race') {
-      const p = stage.points[0];
-      this.marker = { x: p.x, z: p.z, radius: 9, label: 'Gerbang 1/' + stage.points.length };
-    } else if (stage.type === 'defeat') {
-      const l = this.loc(stage.loc);
-      this.marker = { x: l.x, z: l.z, radius: 12, label: 'Lawan' };
-    } else if (stage.type === 'collect') {
-      const l = this.loc(stage.loc);
-      for (let i = 0; i < stage.count; i++) {
-        this.collectibles.push({ x: l.x - 12 + i * 12, z: l.z + 6, taken: false });
-      }
-      this.marker = { x: l.x, z: l.z, radius: 14, label: 'Peti' };
-    } else if (stage.type === 'survive') {
-      this.marker = null;
-    }
-    this.objective = stage.text;
-  }
-
-  advanceStage() {
-    this.active.stage++;
-    if (this.active.stage >= this.active.mission.stages.length) {
-      this.completeMission();
-    } else {
-      this.setupStage();
+/** Set up the current stage: spawn enemies, items, wanted, markers. */
+export function prepareStage(active, game) {
+  const stage = active.mission.stages[active.stageIndex];
+  active.progress = 0;
+  active.timer = 0;
+  active.spawned = true;
+  const world = game.world;
+  if (stage.type === 'defeat') {
+    game.clearEnemies();
+    for (let i = 0; i < stage.count + 2; i += 1) {
+      const a = (i / (stage.count + 2)) * Math.PI * 2;
+      game.spawnEnemy(
+        stage.x + Math.cos(a) * (8 + (i % 3) * 5),
+        stage.z + Math.sin(a) * (8 + (i % 3) * 5),
+        stage.enemyName || 'Musuh',
+        60 + active.stageIndex * 10,
+      );
     }
   }
-
-  completeMission() {
-    const m = this.active.mission;
-    this.done.push(m.id);
-    this.showBanner('MISI SELESAI', `${m.title} — +$${m.reward.money}, +${m.reward.respect} respect`);
-    this.active = null;
-    this.marker = null;
-    this.objective = 'Misi selesai. Misi berikutnya tersedia di penanda kuning.';
-    this._reward = m.reward;
-    this.index++;
-    if (this.index >= MISSIONS.length) this.allComplete = true;
-  }
-
-  takeReward() {
-    const r = this._reward;
-    this._reward = null;
-    return r;
-  }
-
-  // ---- Side jobs ---------------------------------------------------------
-
-  startSideJob(kind, playerPos) {
-    if (this.active || this.sideJob) return false;
-    const job = SIDE_JOBS[kind];
-    this.sideJob = {
-      kind,
-      ...job,
-      stage: 0,
-      timer: kind === 'delivery' ? 80 : kind === 'race' ? 60 : 0,
-    };
-    if (kind === 'taxi') {
-      this.marker = { x: playerPos.x + 10, z: playerPos.z + 6, radius: 6, label: 'Penumpang' };
-      this.objective = 'Jemput penumpang taksi';
-    } else if (kind === 'delivery') {
-      const l = this.loc('market');
-      this.marker = { x: l.x, z: l.z, radius: 8, label: 'Paket' };
-      this.objective = 'Ambil paket di Pasar Malam';
-    } else if (kind === 'race') {
-      this.raceIndex = 0;
-      const pts = [
-        { x: -200, z: 240 }, { x: -80, z: 240 }, { x: 40, z: 240 },
-        { x: 160, z: 200 }, { x: 160, z: 80 },
-      ];
-      this.sideJob.points = pts;
-      this.marker = { x: pts[0].x, z: pts[0].z, radius: 9, label: 'Gerbang 1/5' };
-      this.objective = 'Balap liar: lewati 5 gerbang';
-    }
-    this.showBanner('KERJA SAMPINGAN', job.title);
-    return true;
-  }
-
-  finishSideJob(success) {
-    const job = this.sideJob;
-    this.sideJob = null;
-    this.marker = null;
-    if (success && job) {
-      this.showBanner('KERJA SELESAI', `${job.title} — +$${job.reward}`);
-      this._reward = { money: job.reward, respect: 3 };
-    } else {
-      this.objective = 'Kerja sampingan batal.';
+  if (stage.type === 'collect') {
+    game.clearPickups();
+    for (let i = 0; i < stage.count; i += 1) {
+      const a = (i / stage.count) * Math.PI * 2 + 0.4;
+      game.spawnPickup(stage.x + Math.cos(a) * 14, stage.z + Math.sin(a) * 14, stage.itemName || 'Paket');
     }
   }
-
-  // ---- Per-frame checks ---------------------------------------------------
-
-  // ctx: {player, playerCar, police, game}
-  update(dt, ctx) {
-    if (this.banner) {
-      this.banner.t += dt;
-      if (this.banner.t > 5) this.banner = null;
-    }
-    if (this.sideJob) {
-      this.updateSideJob(dt, ctx);
-      return;
-    }
-    if (!this.active) return;
-    const stage = this.active.mission.stages[this.active.stage];
-    const px = ctx.playerCar ? ctx.playerCar.x : ctx.player.x;
-    const pz = ctx.playerCar ? ctx.playerCar.z : ctx.player.z;
-    if (stage.time) {
-      this.timer -= dt;
-      if (this.timer <= 0) {
-        this.failMission('Waktu habis. Coba lagi dari awal misi.');
-        return;
-      }
-    }
-    switch (stage.type) {
-      case 'goto':
-      case 'deliver': {
-        const l = this.loc(stage.loc);
-        if (dist2D(px, pz, l.x, l.z) < stage.radius) this.advanceStage();
-        break;
-      }
-      case 'steal': {
-        if (ctx.playerCar && ctx.playerCar.missionTarget) this.advanceStage();
-        break;
-      }
-      case 'race': {
-        const p = stage.points[this.raceIndex];
-        if (dist2D(px, pz, p.x, p.z) < 9) {
-          this.raceIndex++;
-          if (this.raceIndex >= stage.points.length) {
-            this.advanceStage();
-          } else {
-            const np = stage.points[this.raceIndex];
-            this.marker = { x: np.x, z: np.z, radius: 9, label: `Gerbang ${this.raceIndex + 1}/${stage.points.length}` };
-          }
-        }
-        break;
-      }
-      case 'defeat': {
-        const alive = this.spawnedPeds.filter((p) => !p.dead).length;
-        if (this.spawnedPeds.length > 0 && alive === 0) this.advanceStage();
-        break;
-      }
-      case 'collect': {
-        const left = this.collectibles.filter((c) => !c.taken).length;
-        if (left === 0) this.advanceStage();
-        break;
-      }
-      case 'survive': {
-        this.timer -= dt;
-        if (ctx.police.wanted < (stage.wanted ?? 1)) {
-          // Lost the heat: fail the stage, keep the mission.
-          this.failMission('Bintangmu hilang. Polisi harus tetap mengejarmu.');
-          return;
-        }
-        if (this.timer <= 0) this.advanceStage();
-        break;
-      }
-      case 'escape': {
-        if (ctx.police.wanted < (stage.wanted ?? 1)) {
-          this.failMission('Bintangmu hilang sebelum sampai tujuan.');
-          return;
-        }
-        const l = this.loc(stage.loc);
-        if (dist2D(px, pz, l.x, l.z) < stage.radius) this.advanceStage();
-        break;
-      }
-      default:
-        break;
+  if (stage.type === 'survive') {
+    game.setWanted(stage.wanted);
+    if (game.player.onFoot) {
+      // Survive stages are chases: put Raka in a car if he is on foot.
+      const near = game.nearestParkedCar(20);
+      if (near) game.stealCarSilently(near);
     }
   }
-
-  // A failed mission clears the active mission but keeps the story index,
-  // so the player can walk back to the start marker and try again.
-  failMission(reason) {
-    this.showBanner('GAGAL', reason);
-    this.active = null;
-    this.marker = null;
-    this.objective = 'Misi gagal. Pergi ke penanda kuning untuk mengulang.';
+  if (stage.type === 'enter') {
+    game.ensureVehicleNear(stage.x, stage.z, stage.vehicle || 'truck');
   }
+}
 
-  updateSideJob(dt, ctx) {
-    const job = this.sideJob;
-    const px = ctx.playerCar ? ctx.playerCar.x : ctx.player.x;
-    const pz = ctx.playerCar ? ctx.playerCar.z : ctx.player.z;
-    if (job.timer > 0) {
-      job.timer -= dt;
-      if (job.timer <= 0) {
-        this.finishSideJob(false);
-        return;
-      }
+/** Advance the active stage: returns 'stage' | 'mission' | null. */
+export function stepMissions(missions, game, dt) {
+  const a = missions.active;
+  if (!a) return null;
+  const stage = a.mission.stages[a.stageIndex];
+  const p = game.player;
+
+  if (stage.type === 'reach') {
+    if (dist2d(p.x, p.z, stage.x, stage.z) < stage.radius) return advanceStage(missions, game);
+  } else if (stage.type === 'drive') {
+    if (!p.onFoot && dist2d(p.x, p.z, stage.x, stage.z) < stage.radius) return advanceStage(missions, game);
+  } else if (stage.type === 'enter') {
+    if (!p.onFoot && (!stage.vehicle || p.car?.defId === stage.vehicle)) return advanceStage(missions, game);
+  } else if (stage.type === 'defeat') {
+    if (a.progress >= stage.count) return advanceStage(missions, game);
+  } else if (stage.type === 'collect') {
+    if (a.progress >= stage.count) return advanceStage(missions, game);
+  } else if (stage.type === 'survive') {
+    a.timer += dt;
+    if (a.timer >= stage.seconds) return advanceStage(missions, game);
+  }
+  return null;
+}
+
+/** Move to the next stage, or finish the mission. */
+function advanceStage(missions, game) {
+  const a = missions.active;
+  const mission = a.mission;
+  a.stageIndex += 1;
+  if (a.stageIndex >= mission.stages.length) {
+    completeMission(missions, game);
+    return 'mission';
+  }
+  game.audio.cash();
+  prepareStage(a, game);
+  return 'stage';
+}
+
+/** Pay out, jingle, unlock the next mission. */
+function completeMission(missions, game) {
+  const mission = missions.active.mission;
+  missions.completed.push(mission.id);
+  missions.active = null;
+  game.clearEnemies();
+  game.clearPickups();
+  game.player.money += mission.reward;
+  game.audio.missionJingle();
+  game.showBanner('MISI SELESAI', `${mission.title} — +Rp ${mission.reward}`);
+  game.setDialogue(`Raka: ${mission.title} selesai. Rp ${mission.reward} masuk.`);
+  if (game.stats) {
+    game.stats.missionsCompleted += 1;
+    game.stats.moneyEarned += mission.reward;
+  }
+  missions.index += 1;
+  if (missions.index >= MISSIONS.length) {
+    missions.finishedStory = true;
+    game.showBanner('TAMAT — LEGENDA TANJUNG', 'Raka menguasai Tanjung Matahari!');
+    game.setDialogue('Sari: Kau melakukannya, Raka. Kota ini milik kita sekarang.');
+    return;
+  }
+  // The next mission starts when the player reaches its marker, via the HUD prompt.
+  game.pendingMission = missions.index;
+}
+
+/** Start the pending next mission (called when the player accepts the prompt). */
+export function startPendingMission(missions, game) {
+  if (game.pendingMission === null || game.pendingMission === undefined) return null;
+  const index = game.pendingMission;
+  game.pendingMission = null;
+  return startMission(missions, index, game);
+}
+
+/** Start a side job by id, if the player stands near its start marker. */
+export function startSideJob(missions, jobId, game) {
+  const job = SIDE_JOBS.find((j) => j.id === jobId);
+  if (!job || missions.sideJob) return null;
+  missions.sideJob = {
+    job, timer: 0, phase: 'pickup',
+    passenger: null,
+  };
+  game.setDialogue(`Penumpang: Tolong antar saya ke ${job.destName}.`);
+  game.showBanner('KERJA SAMPINGAN', `${job.name} — ke ${job.destName}`);
+  return missions.sideJob;
+}
+
+/** Step the active side job. Returns 'done' when paid out. */
+export function stepSideJob(missions, game, dt) {
+  const sj = missions.sideJob;
+  if (!sj) return null;
+  const p = game.player;
+  sj.timer += dt;
+  if (sj.phase === 'pickup') {
+    if (dist2d(p.x, p.z, sj.job.start.x, sj.job.start.z) < 8) {
+      sj.phase = 'drive';
+      game.setDialogue('Penumpang: Sudah naik. Jalan, mas!');
     }
-    if (job.kind === 'taxi') {
-      if (job.stage === 0) {
-        if (this.marker && dist2D(px, pz, this.marker.x, this.marker.z) < 6) {
-          job.stage = 1;
-          const l = this.loc('beach');
-          this.marker = { x: l.x, z: l.z, radius: 9, label: 'Tujuan penumpang' };
-          this.objective = 'Antar penumpang ke Pantai Matahari';
-        }
-      } else if (this.marker && dist2D(px, pz, this.marker.x, this.marker.z) < 9) {
-        this.finishSideJob(true);
-      }
-    } else if (job.kind === 'delivery') {
-      if (job.stage === 0) {
-        const l = this.loc('market');
-        if (dist2D(px, pz, l.x, l.z) < 8) {
-          job.stage = 1;
-          const h = this.loc('harbor');
-          this.marker = { x: h.x, z: h.z, radius: 10, label: 'Tujuan paket' };
-          this.objective = 'Antar paket ke Pelabuhan';
-        }
-      } else if (this.marker && dist2D(px, pz, this.marker.x, this.marker.z) < 10) {
-        this.finishSideJob(true);
-      }
-    } else if (job.kind === 'race') {
-      const p = job.points[this.raceIndex];
-      if (dist2D(px, pz, p.x, p.z) < 9) {
-        this.raceIndex++;
-        if (this.raceIndex >= job.points.length) {
-          this.finishSideJob(true);
-        } else {
-          const np = job.points[this.raceIndex];
-          this.marker = { x: np.x, z: np.z, radius: 9, label: `Gerbang ${this.raceIndex + 1}/5` };
-        }
-      }
+    return null;
+  }
+  if (sj.phase === 'drive') {
+    if (!p.onFoot && dist2d(p.x, p.z, sj.job.dest.x, sj.job.dest.z) < 10) {
+      const pay = sj.job.pay;
+      game.player.money += pay;
+      game.audio.cash();
+      game.audio.missionJingle();
+      game.showBanner('KERJA SELESAI', `${sj.job.name} — +Rp ${pay}`);
+      game.setDialogue('Penumpang: Terima kasih, mas! Ini upahnya.');
+      missions.sideJob = null;
+      missions.jobsDone += 1;
+      if (game.stats) game.stats.moneyEarned += pay;
+      return 'done';
     }
   }
+  return null;
+}
+
+/** The nearest side-job start marker, if the player is close to one. */
+export function nearbySideJob(missions, player) {
+  if (missions.sideJob) return null;
+  for (const job of SIDE_JOBS) {
+    if (dist2d(player.x, player.z, job.start.x, job.start.z) < 12) return job;
+  }
+  return null;
+}
+
+/** Where the mission marker (small yellow diamond) should be drawn, if any. */
+export function currentMarker(missions, game) {
+  const a = missions.active;
+  if (a) {
+    const stage = a.mission.stages[a.stageIndex];
+    if (stage.x !== undefined && stage.z !== undefined) return { x: stage.x, z: stage.z };
+    return null;
+  }
+  if (missions.sideJob) {
+    const sj = missions.sideJob;
+    return sj.phase === 'pickup'
+      ? { x: sj.job.start.x, z: sj.job.start.z }
+      : { x: sj.job.dest.x, z: sj.job.dest.z };
+  }
+  if (game.pendingMission !== null && game.pendingMission !== undefined) {
+    const next = MISSIONS[game.pendingMission];
+    if (next) {
+      const s0 = next.stages[0];
+      if (s0.x !== undefined) return { x: s0.x, z: s0.z };
+    }
+  }
+  return null;
 }
