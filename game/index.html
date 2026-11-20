@@ -3,108 +3,211 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Tanjung Matahari — Game Dunia Terbuka</title>
+<title>Tanjung Matahari — Open World</title>
 <style>
-  /* Full-screen game: the WebGL canvas fills the window, the HUD floats
-     over it, and nothing on the page scrolls. */
-  html, body { margin: 0; height: 100%; overflow: hidden; background: #0e1a24; font-family: 'Segoe UI', system-ui, sans-serif; }
+  :root { color-scheme: dark; }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; height: 100%; overflow: hidden; background: #0b1020; font-family: "Segoe UI", system-ui, sans-serif; color: #f2ede0; }
   #game { position: fixed; inset: 0; width: 100%; height: 100%; display: block; touch-action: none; }
-  /* Screen-reader status line, visually hidden. */
-  #sr-status { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap; }
-  #hud { position: fixed; inset: 0; pointer-events: none; color: #fff; }
-  #vignette { position: absolute; inset: 0; box-shadow: inset 0 0 120px rgba(255,0,0,0); transition: box-shadow .15s; }
-  #vignette.hit { box-shadow: inset 0 0 120px rgba(255,0,0,.55); }
+  #status { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap; }
 
-  /* Top-left: health and armour bars with numbers, money, respect rank. */
-  #status { position: absolute; top: 14px; left: 14px; }
-  .bar { display: flex; align-items: center; gap: 6px; margin-bottom: 5px; }
-  .bar .label { font-size: 10px; font-weight: 700; letter-spacing: 1px; width: 44px; text-shadow: 0 1px 2px #000; }
-  .track { width: 170px; height: 10px; background: rgba(0,0,0,.55); border: 1px solid rgba(255,255,255,.35); border-radius: 5px; overflow: hidden; }
-  .fill { height: 100%; }
-  .fill.hp { background: linear-gradient(90deg, #2ecc71, #7bed9f); width: 100%; }
-  .fill.armour { background: linear-gradient(90deg, #3498db, #70a1ff); width: 0%; }
-  .bar .num { font-size: 11px; font-weight: 700; width: 26px; text-shadow: 0 1px 2px #000; }
-  #money { font-size: 22px; font-weight: 800; text-shadow: 0 2px 3px #000; color: #7bed9f; }
-  #respect { font-size: 12px; text-shadow: 0 1px 2px #000; opacity: .95; }
+  /* ---------- HUD ---------- */
+  #hud { position: fixed; inset: 0; pointer-events: none; z-index: 5; }
+  #hud.dim { opacity: 0.25; }
+  .panel { background: rgba(8, 12, 24, 0.72); border: 1px solid rgba(255, 210, 90, 0.35); border-radius: 10px; backdrop-filter: blur(2px); }
+  #vitals { position: absolute; top: 14px; left: 14px; padding: 10px 14px; min-width: 240px; }
+  #vitals .row { display: flex; align-items: center; gap: 8px; margin: 3px 0; font-size: 14px; }
+  #vitals .label { width: 74px; font-size: 11px; letter-spacing: 1px; color: #ffd25e; font-weight: 700; }
+  .bar { flex: 1; height: 10px; background: #222; border-radius: 5px; overflow: hidden; }
+  .bar > div { height: 100%; border-radius: 5px; }
+  #healthBar { background: linear-gradient(90deg, #37c978, #7be495); width: 100%; }
+  #armourBar { background: linear-gradient(90deg, #3a8cff, #7db4ff); width: 0%; }
+  #healthNum, #armourNum { width: 30px; text-align: right; font-weight: 700; }
+  #money { font-size: 20px; font-weight: 800; color: #7be495; margin-top: 4px; }
+  #respect { font-size: 12px; color: #ffd25e; }
+  #missionStage { font-size: 12px; color: #9fd8ff; }
 
-  /* Top-right: wanted stars, clock, dispatch feed, chasing units. */
-  #wanted { position: absolute; top: 12px; right: 16px; font-size: 30px; letter-spacing: 4px; text-shadow: 0 2px 4px #000; }
-  #wanted .star { color: rgba(255,255,255,.25); }
-  #wanted .star.on { color: #ffd23f; }
-  #wantedLabel { position: absolute; top: 50px; right: 18px; font-size: 11px; font-weight: 700; color: #ff9f9f; text-shadow: 0 1px 2px #000; text-align: right; display: none; }
-  #clock { position: absolute; top: 74px; right: 18px; font-size: 13px; font-weight: 700; text-shadow: 0 1px 2px #000; }
-  #feed { position: absolute; top: 110px; right: 16px; width: 300px; text-align: right; font-size: 12px; }
-  .feedLine { background: rgba(0,0,0,.5); padding: 4px 8px; margin-bottom: 4px; border-radius: 5px; border-right: 3px solid #3498db; }
-  #policeInfo { position: absolute; top: 240px; right: 16px; width: 300px; text-align: right; font-size: 12px; }
-  .policeLine { background: rgba(0,0,0,.5); padding: 4px 8px; margin-bottom: 4px; border-radius: 5px; border-right: 3px solid #ff3b30; }
+  #wanted { position: absolute; top: 14px; right: 14px; padding: 10px 14px; text-align: right; min-width: 230px; }
+  #stars { font-size: 26px; letter-spacing: 4px; color: #ffd25e; line-height: 1; }
+  #stars.hot { color: #ff5a4a; text-shadow: 0 0 12px rgba(255, 90, 60, 0.8); }
+  #wantedLabel { font-size: 13px; font-weight: 700; color: #ffb3a0; }
+  #clock { font-size: 22px; font-weight: 800; }
+  #street { font-size: 12px; color: #cfe3ff; }
+  #radioName { font-size: 12px; color: #ffd25e; }
 
-  /* Top-centre: mission stage, objective, counter, timer. */
-  #objective { position: absolute; top: 14px; left: 50%; transform: translateX(-50%); text-align: center; background: rgba(0,0,0,.55); padding: 8px 18px; border-radius: 8px; border: 1px solid rgba(255,210,63,.5); max-width: 520px; }
-  #stageLine { font-size: 11px; font-weight: 700; letter-spacing: 1px; color: #ffd23f; text-transform: uppercase; }
-  #objText { font-size: 15px; font-weight: 600; }
-  #objCounter { font-size: 14px; font-weight: 800; color: #7bed9f; margin-top: 2px; }
-  #objTimer { font-size: 13px; color: #ffd23f; font-weight: 700; }
+  #objective { position: absolute; top: 14px; left: 50%; transform: translateX(-50%); padding: 8px 18px; text-align: center; max-width: 520px; }
+  #objText { font-size: 15px; font-weight: 700; }
+  #objSub { font-size: 11px; color: #b9c4d6; }
 
-  /* Centre: the mission banner. Lower-centre: dialogue and prompts. */
-  #banner { position: absolute; top: 32%; left: 50%; transform: translateX(-50%); text-align: center; opacity: 0; transition: opacity .4s; }
-  #banner.show { opacity: 1; }
-  #bannerTitle { font-size: 44px; font-weight: 900; letter-spacing: 3px; color: #ffd23f; text-shadow: 0 3px 0 #b33939, 0 5px 12px #000; }
-  #bannerSub { font-size: 16px; text-shadow: 0 2px 4px #000; margin-top: 6px; }
-  #dialogue { position: absolute; bottom: 210px; left: 50%; transform: translateX(-50%); background: rgba(0,0,0,.6); padding: 7px 14px; border-radius: 8px; font-size: 14px; font-style: italic; border-left: 3px solid #ffd23f; display: none; max-width: 560px; text-align: center; }
-  #prompt { position: absolute; bottom: 150px; left: 50%; transform: translateX(-50%); background: rgba(0,0,0,.65); padding: 8px 16px; border-radius: 8px; font-size: 15px; border: 1px solid rgba(255,255,255,.4); display: none; }
+  #policeBox { position: absolute; top: 150px; right: 14px; padding: 8px 12px; min-width: 220px; font-size: 12px; }
+  #policeBox .polTitle { font-size: 11px; letter-spacing: 1px; color: #ff9a8a; font-weight: 700; margin-bottom: 4px; }
+  .polRow { display: flex; justify-content: space-between; gap: 12px; padding: 1px 0; }
 
-  /* Bottom: minimap (left), radio (centre-left), speed (right), wheel. */
-  #minimap { position: absolute; left: 14px; bottom: 14px; border: 2px solid rgba(255,255,255,.5); border-radius: 8px; background: rgba(10,30,25,.85); }
-  #radio { position: absolute; bottom: 16px; left: 250px; font-size: 13px; text-shadow: 0 1px 2px #000; background: rgba(0,0,0,.45); padding: 6px 10px; border-radius: 6px; }
-  #radio span { color: #ffd23f; }
-  #speed { position: absolute; bottom: 16px; right: 18px; text-align: right; display: none; }
-  #speedNum { font-size: 46px; font-weight: 900; text-shadow: 0 2px 4px #000; }
-  #speedUnit { font-size: 14px; margin-left: 4px; }
-  #carName { font-size: 13px; color: #ffd23f; text-shadow: 0 1px 2px #000; }
-  #carCond { font-size: 12px; color: #dfe9f3; text-shadow: 0 1px 2px #000; }
-  #wheel { position: absolute; bottom: 120px; left: 50%; transform: translateX(-50%); display: none; gap: 10px; }
-  .wslot { background: rgba(0,0,0,.65); border: 2px solid rgba(255,255,255,.35); padding: 10px 16px; border-radius: 8px; font-size: 15px; }
-  .wslot.sel { border-color: #ffd23f; background: rgba(255,210,63,.25); }
+  #speedBox { position: absolute; right: 16px; bottom: 170px; text-align: right; }
+  #speed { font-size: 30px; font-weight: 800; text-shadow: 0 2px 8px rgba(0,0,0,0.7); }
+  #speedSub { font-size: 11px; color: #cfe3ff; }
 
-  /* Menus: title, pause, garage, map, game over. */
-  #menu { position: absolute; inset: 0; display: none; align-items: center; justify-content: center; background: rgba(5, 15, 25, .28); pointer-events: auto; }
-  .panel { background: rgba(8, 22, 34, .92); border: 2px solid #ffd23f; border-radius: 14px; padding: 28px 34px; max-width: 560px; text-align: center; box-shadow: 0 10px 40px rgba(0,0,0,.6); }
-  .panel h2 { margin: 0 0 12px; color: #ffd23f; letter-spacing: 2px; }
-  .panel p { font-size: 14px; line-height: 1.5; }
-  .gameTitle { font-size: 58px; font-weight: 900; line-height: .95; letter-spacing: 2px; color: #ffd23f; text-shadow: 0 4px 0 #b33939, 0 8px 20px #000; }
-  .tagline { margin: 12px 0 20px; font-size: 15px; color: #dfe9f3; }
-  .btns { display: flex; flex-direction: column; gap: 10px; margin-top: 14px; }
-  .btns button, .shopRow button { pointer-events: auto; cursor: pointer; background: #ffd23f; color: #1a1a1a; border: none; border-radius: 8px; padding: 11px 22px; font-size: 16px; font-weight: 700; }
-  .btns button:hover, .shopRow button:hover { background: #ffe27a; }
-  .btns button:focus-visible, .shopRow button:focus-visible { outline: 3px solid #fff; outline-offset: 2px; }
-  .foot { margin-top: 18px; font-size: 11px; opacity: .7; }
-  .help { text-align: left; font-size: 14px; line-height: 1.6; }
-  .help b { color: #ffd23f; }
-  .shopRow { text-align: left; background: rgba(255,255,255,.06); border-radius: 8px; padding: 10px 12px; margin-bottom: 8px; font-size: 14px; }
-  .shopRow button { padding: 5px 14px; font-size: 14px; margin-left: 8px; }
+  #minimapWrap { position: absolute; left: 14px; bottom: 14px; }
+  #minimap { width: 190px; height: 190px; border: 2px solid rgba(255, 210, 90, 0.6); border-radius: 50%; background: #16241a; display: block; }
 
-  /* Map screen: big map on the left, mission list and stats on the right.
-     Kept compact on purpose: the whole panel must fit in 92vh at 720p, so
-     the save slots and buttons are visible without scrolling. */
-  .mapPanel { max-width: 880px; max-height: 92vh; overflow-y: auto; text-align: left; padding: 16px 22px; }
-  .mapPanel h2 { text-align: center; margin-bottom: 6px; }
-  .mapClock { text-align: center; font-size: 13px; font-weight: 700; color: #ffd23f; margin-bottom: 4px; }
-  .mapGrid { display: grid; grid-template-columns: 280px 1fr; gap: 12px; align-items: start; }
-  .mapCol { min-width: 0; }
-  #bigmap { display: block; border: 2px solid rgba(255,255,255,.5); border-radius: 8px; background: rgba(10,30,25,.85); }
-  .mapBtns { flex-direction: row; justify-content: center; flex-wrap: wrap; margin-top: 8px; gap: 8px; }
-  .mapBtns button { flex: 1 1 160px; padding: 8px 16px; }
-  .mapSec { margin: 8px 0; }
-  .mapSec h3 { margin: 0 0 4px; color: #ffd23f; font-size: 13px; letter-spacing: 1px; }
-  .mapRow { display: flex; justify-content: space-between; gap: 12px; font-size: 12px; padding: 3px 2px; border-bottom: 1px solid rgba(255,255,255,.08); }
-  .mapRow b { white-space: nowrap; }
+  #dialogue { position: absolute; left: 50%; bottom: 24px; transform: translateX(-50%); max-width: 640px; padding: 10px 18px; font-size: 15px; font-style: italic; text-align: center; opacity: 0; transition: opacity 0.3s; }
+  #dialogue.show { opacity: 1; }
+  #prompt { position: absolute; left: 50%; bottom: 96px; transform: translateX(-50%); padding: 7px 16px; font-size: 14px; font-weight: 700; color: #ffd25e; opacity: 0; transition: opacity 0.2s; }
+  #prompt.show { opacity: 1; }
+
+  #banner { position: absolute; top: 22%; left: 50%; transform: translateX(-50%) scale(0.96); text-align: center; opacity: 0; transition: opacity 0.35s, transform 0.35s; pointer-events: none; }
+  #banner.show { opacity: 1; transform: translateX(-50%) scale(1); }
+  #bannerTitle { font-size: 44px; font-weight: 900; letter-spacing: 2px; color: #ffd25e; text-shadow: 0 3px 0 #7a4a00, 0 6px 18px rgba(0,0,0,0.8); }
+  #bannerSub { font-size: 19px; font-weight: 700; color: #fff; text-shadow: 0 2px 10px rgba(0,0,0,0.9); }
+
+  #crimeFlash { position: absolute; top: 120px; left: 50%; transform: translateX(-50%); padding: 6px 14px; font-size: 13px; font-weight: 700; color: #ff8a7a; opacity: 0; transition: opacity 0.2s; }
+  #crimeFlash.show { opacity: 1; }
+
+  #bustBar { position: absolute; top: 160px; left: 50%; transform: translateX(-50%); width: 320px; padding: 8px 12px; display: none; }
+  #bustBar.show { display: block; }
+  #bustBar .bustTitle { font-size: 12px; font-weight: 800; color: #ff8a7a; letter-spacing: 1px; text-align: center; }
+  #bustBar .bar { height: 12px; margin-top: 4px; }
+  #bustFill { background: linear-gradient(90deg, #ff5a4a, #ff9a3a); width: 0%; }
+
+  #wheel { position: absolute; left: 50%; top: 50%; transform: translate(-50%, -50%); display: none; gap: 10px; padding: 14px; }
+  #wheel.show { display: flex; }
+  .wheelSlot { padding: 12px 16px; border-radius: 8px; background: rgba(20, 28, 44, 0.9); border: 1px solid #445; text-align: center; min-width: 110px; }
+  .wheelSlot.sel { border-color: #ffd25e; background: rgba(80, 60, 10, 0.9); }
+  .wheelSlot b { display: block; font-size: 15px; }
+  .wheelSlot span { font-size: 12px; color: #b9c4d6; }
+
+  /* ---------- Screens ---------- */
+  .screen { position: fixed; inset: 0; z-index: 10; display: none; align-items: center; justify-content: center; background: linear-gradient(180deg, rgba(5, 8, 18, 0.55), rgba(5, 8, 18, 0.88)); }
+  .screen.show { display: flex; }
+  .card { max-width: 680px; width: 92%; padding: 34px 40px; background: rgba(10, 14, 28, 0.92); border: 1px solid rgba(255, 210, 90, 0.5); border-radius: 16px; text-align: center; }
+  .card h1 { margin: 0 0 4px; font-size: 52px; letter-spacing: 3px; color: #ffd25e; text-shadow: 0 3px 0 #7a4a00; }
+  .card h2 { margin: 0 0 10px; font-size: 30px; color: #ffd25e; }
+  .card .tag { font-size: 15px; color: #cfe3ff; margin: 6px 0 18px; }
+  .card p { font-size: 14px; line-height: 1.55; color: #d8dee9; }
+  .btnRow { display: flex; gap: 10px; justify-content: center; flex-wrap: wrap; margin-top: 18px; }
+  button { pointer-events: auto; cursor: pointer; font-size: 15px; font-weight: 700; padding: 11px 22px; border-radius: 9px; border: 1px solid #ffd25e; background: #2a2110; color: #ffd25e; }
+  button:hover { background: #4a3a14; }
+  button.primary { background: #ffd25e; color: #201600; }
+  button.primary:hover { background: #ffe08a; }
+  button[disabled] { opacity: 0.4; cursor: default; }
+  #howto { display: none; margin-top: 16px; text-align: left; font-size: 13px; line-height: 1.7; background: rgba(255,255,255,0.05); padding: 12px 16px; border-radius: 10px; }
+  #howto.show { display: block; }
+  #howto b { color: #ffd25e; }
+
+  /* ---------- Map ---------- */
+  #mapOverlay { background: rgba(4, 7, 16, 0.9); flex-direction: column; }
+  .mapPanel { max-width: 760px; width: 94%; max-height: 84vh; overflow-y: auto; padding: 16px 28px; background: rgba(12, 18, 34, 0.97); border: 1px solid rgba(255, 210, 90, 0.55); border-radius: 14px; }
+  .mapPanel h2 { margin: 0 0 8px; font-size: 24px; color: #ffd25e; letter-spacing: 2px; text-align: center; }
+  .mapSection { font-size: 12px; letter-spacing: 2px; font-weight: 800; color: #9fd8ff; margin: 8px 0 3px; border-bottom: 1px solid #334; padding-bottom: 2px; }
+  .mapRow { display: flex; gap: 10px; align-items: baseline; padding: 2px 4px; font-size: 13px; border-bottom: 1px solid rgba(255,255,255,0.06); }
+  .mapRow.done { color: #8fd8a0; }
+  .mapRow.active { color: #ffd25e; font-weight: 700; }
+  .mapRow.locked { color: #778; }
+  .mapRow.avail { color: #cfe3ff; }
+  .mapNum { width: 22px; font-weight: 800; flex-shrink: 0; }
+  .mapTitle { flex: 1; }
+  .mapState { font-size: 11px; font-weight: 800; letter-spacing: 1px; }
+  .mapStats { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 6px 16px; font-size: 13px; padding: 4px; }
+  .mapHint { margin-top: 14px; text-align: center; font-size: 12px; color: #9aa8bd; }
 </style>
 </head>
 <body>
-<noscript><p style="color:#fff;padding:20px">Tanjung Matahari butuh JavaScript untuk berjalan. Aktifkan JavaScript, lalu muat ulang halaman ini.</p></noscript>
-<canvas id="game" aria-label="Tanjung Matahari: game dunia terbuka 3D, berjalan kaki dan mengemudi di kota pantai"></canvas>
-<p id="sr-status" role="status" aria-live="polite"></p>
-<div id="hud"></div>
-<script type="module" src="./src/main.js"></script>
+<canvas id="game" aria-label="Tanjung Matahari: kota terbuka di pesisir Indonesia, dimainkan dengan keyboard dan mouse"></canvas>
+<p id="status" role="status" aria-live="polite"></p>
+
+<div id="hud">
+  <div id="vitals" class="panel">
+    <div class="row"><span class="label">NYAWA</span><div class="bar"><div id="healthBar"></div></div><span id="healthNum">100</span></div>
+    <div class="row"><span class="label">ARMOR</span><div class="bar"><div id="armourBar"></div></div><span id="armourNum">0</span></div>
+    <div id="money">Rp 300</div>
+    <div id="respect">Anak Baru · 0/8 misi</div>
+    <div id="missionStage">Mode Bebas</div>
+  </div>
+  <div id="wanted" class="panel">
+    <div id="stars">☆☆☆☆☆</div>
+    <div id="wantedLabel">Bersih</div>
+    <div id="clock">06:30</div>
+    <div id="street">Jalan Tanjung Raya</div>
+    <div id="radioName">Dangdut Pantura FM · 98.4 FM</div>
+  </div>
+  <div id="objective" class="panel">
+    <div id="objText">Bebas berkeliling — tekan M untuk peta</div>
+    <div id="objSub">TANJUNG MATAHARI · RAKA</div>
+  </div>
+  <div id="policeBox" class="panel">
+    <div class="polTitle">POLISI TERDEKAT</div>
+    <div id="policeList"></div>
+  </div>
+  <div id="speedBox"><div id="speed">JALAN KAKI</div><div id="speedSub">W A S D gerak · Shift lari · E mobil</div></div>
+  <div id="minimapWrap"><canvas id="minimap" width="190" height="190"></canvas></div>
+  <div id="dialogue" class="panel"></div>
+  <div id="prompt" class="panel"></div>
+  <div id="banner"><div id="bannerTitle"></div><div id="bannerSub"></div></div>
+  <div id="crimeFlash" class="panel"></div>
+  <div id="bustBar" class="panel"><div class="bustTitle">POLISI MENANGKAPMU — JANGAN BERHENTI!</div><div class="bar"><div id="bustFill"></div></div></div>
+  <div id="wheel" class="panel"></div>
+</div>
+
+<div id="title" class="screen">
+  <div class="card">
+    <h1>TANJUNG MATAHARI</h1>
+    <div class="tag">Kota terbuka di pesisir Indonesia · Raka pulang, dan kota ini akan mengenal namanya.</div>
+    <p>Delapan misi cerita dalam tiga bab, kejar-kejaran dengan polisi sampai lima bintang, mobil yang bisa dicuri, tiga stasiun radio, kerja sampingan ojek dan taksi, dan dua belas keris emas tersembunyi di seluruh kota.</p>
+    <div class="btnRow">
+      <button class="primary" data-a="new">▶ Permainan Baru</button>
+      <button data-a="continue">Lanjutkan (Slot 1)</button>
+      <button data-a="howto">Cara Main</button>
+    </div>
+    <div id="howto">
+      <b>W A S D</b> jalan / mengemudi · <b>Shift</b> lari · <b>E</b> masuk / keluar mobil (mencuri mobil menaikkan wanted) ·
+      <b>F / klik kiri</b> pukul / tembak · <b>Q</b> roda senjata · <b>1 / 2 / 3</b> tinju / pistol / shotgun ·
+      <b>R</b> ganti radio · <b>H</b> klakson · <b>M</b> peta · <b>J</b> kerja sampingan · <b>Esc</b> jeda &amp; simpan.
+      Seret mouse untuk memutar kamera. Ikuti berlian kuning kecil untuk misi.
+    </div>
+  </div>
+</div>
+
+<div id="pause" class="screen">
+  <div class="card">
+    <h2>JEDA</h2>
+    <p>Istirahat sebentar. Kota Tanjung Matahari menunggumu.</p>
+    <div class="btnRow">
+      <button class="primary" data-a="resume">Lanjutkan</button>
+      <button data-a="save">Simpan (Slot 1)</button>
+      <button data-a="quit">Kembali ke Judul</button>
+    </div>
+  </div>
+</div>
+
+<div id="mapOverlay" class="screen">
+  <div class="mapPanel"></div>
+  <div style="margin-top:14px;"><button data-a="close-map">Tutup Peta (M)</button></div>
+</div>
+
+<div id="dead" class="screen">
+  <div class="card">
+    <h2>RAKA TUMBANG</h2>
+    <p>Jalanan Tanjung tidak kenal ampun. Tapi Raka selalu bangkit lagi.</p>
+    <div class="btnRow"><button class="primary" data-a="respawn">Bangun di Rumah Sakit (−Rp 200)</button></div>
+  </div>
+</div>
+
+<div id="busted" class="screen">
+  <div class="card">
+    <h2>DITANGKAP!</h2>
+    <p>Polisi menangkap Raka. Denda dibayar, dan dia dibebaskan di Rumah Sakit Harapan.</p>
+    <div class="btnRow"><button class="primary" data-a="busted-ok">Bebas — Kembali ke Jalanan</button></div>
+  </div>
+</div>
+
+<script type="module">
+  import { createGame } from './src/main.js';
+  try {
+    createGame(document.getElementById('game'), document);
+  } catch (err) {
+    window.__shotError = String(err && err.message ? err.message : err);
+    document.getElementById('status').textContent = 'Gagal memuat: ' + window.__shotError;
+  }
+</script>
 </body>
 </html>
