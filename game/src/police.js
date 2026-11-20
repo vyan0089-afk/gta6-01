@@ -103,10 +103,27 @@ export class PoliceSys {
     z = clamp(z, -250, 250);
     const rp = nearestRoadPoint(this.city.roads, x, z);
     const car = createCar('police', rp.x, rp.z, this.rng.float() * Math.PI * 2, null, 'police');
+    car.unit = UNITS[this.unitIndex % UNITS.length];
+    this.unitIndex++; // every cop gets its own call sign, not Elang-1 for all
     car.path = [];
     car.pathTimer = 0;
     this.cops.push(car);
     return car;
+  }
+
+  // The chasing units nearest the player, for the HUD ("Elang-1 · 38 m").
+  // The helicopter reports in too, when it is up.
+  unitsWithDistance(player) {
+    const px = player.x, pz = player.z;
+    const units = this.cops.map((c, i) => ({
+      name: c.unit ?? UNITS[i % UNITS.length],
+      dist: Math.round(dist2D(c.x, c.z, px, pz)),
+    }));
+    if (this.heli) {
+      units.push({ name: 'Helikopter', dist: Math.round(dist2D(this.heli.x, this.heli.z, px, pz)) });
+    }
+    units.sort((a, b) => a.dist - b.dist);
+    return units.slice(0, 3);
   }
 
   update(dt, ctx) {

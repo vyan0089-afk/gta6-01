@@ -1,14 +1,16 @@
 // main.js — boots Tanjung Matahari: canvas, game loop, and the deterministic
-// screenshot staging used by shots.json (?shot=title|drive|mission|city).
-// Without a ?shot param the game starts on the title screen, like a player
-// would see it.
+// screenshot staging used by shots.json
+// (?shot=chase|mission|drive|map). Without a ?shot param the game starts on
+// the title screen, like a player would see it.
 
 import { Game } from './game.js';
 import { createCar, driveCar } from './vehicles.js';
-import { createPed } from './peds.js';
+import { spawnCrowd } from './peds.js';
+import { saveGame } from './save.js';
+import { clamp } from './math.js';
 
 const canvas = document.getElementById('game');
-const statusEl = document.getElementById('status');
+const statusEl = document.getElementById('sr-status');
 
 function setStatus(text) {
   if (statusEl) statusEl.textContent = text;
@@ -45,6 +47,16 @@ function fixedSteps(n, drive) {
   }
 }
 
+// Autopilot that holds an eastbound car on its road: steer toward the
+// centreline (heading PI/2 = east; too far south needs heading > PI/2,
+// i.e. positive steer) plus a small weave. A bare sine weave drifts off
+// the 10-unit road and into the blocks — the v1 drive shot did exactly
+// that, ending on the sand.
+function roadPilot(car, targetZ, i, colliders, allCars) {
+  const steer = clamp((car.z - targetZ) * 0.06, -0.5, 0.5) + Math.sin(i / 20) * 0.08;
+  driveCar(car, 1, steer, 1 / 60, colliders, allCars);
+}
+
 function stageShot(kind) {
   game.state = 'playing';
   game.hud.hideMenu();
@@ -60,53 +72,141 @@ function stageShot(kind) {
     game.cars.push(car);
     return;
   }
-  if (kind === 'drive') {
-    // Raka in a Panther GT on the coastal road, wanted 3, two patrol cars on his tail.
-    const car = createCar('sport', -40, 240, 0, [0.9, 0.15, 0.15], 'player');
+  if (kind === 'chase') {
+    // COVER: golden-hour chase east along Jalan Pantai (z = 240). Raka in a
+    // Panther GT, wanted 4, helicopter overhead, patrol cars and traffic on
+    // the road, warung crowds on the sidewalk. Heading PI/2 drives +x, i.e.
+    // along the road — the v1 drive shot drove +z, off the road onto sand.
+    game.setLighting('golden');
+    game.dayMinutes = 17 * 60 + 48; // 17:48, golden hour
+    game.missions.startMission(5); // m6 "Malam di Tanjung": survive the heat
+    game.missions.banner = null; // keep the transient title banner out of the frozen frame
+    game.police.addHeat(80, 'Kejaran bintang 4 di Jalan Pantai');
+    const car = createCar('sport', -60, 240, Math.PI / 2, [0.9, 0.15, 0.15], 'player');
     car.engine = 1;
     game.cars.push(car);
     game.playerCar = car;
     game.player.x = car.x;
     game.player.z = car.z;
-    game.camera.yaw = Math.PI;
-    game.police.heat = 60;
-    game.police.wanted = 3;
-    game.police.say('Elang-1: Tersangka melaju di Jalan Pantai. Kejar!');
-    game.missions.objective = 'Kabur dari kejaran polisi di Jalan Pantai';
-    game.missions.marker = { x: 160, z: 240, radius: 9, label: 'Kabur' };
-    fixedSteps(150, (i) => {
-      // Autopilot: full throttle, gentle weave.
+    game.missions.objective = 'Kabur dari kejaran bintang 4 di Jalan Pantai';
+    // Clear random traffic from the staged stretch, then lay out the shot's
+    // own traffic in the two lanes (eastbound z=236, westbound z=244):
+    // four units off the player's centreline, so cars pass without the
+    // side-swipe that stalled the v1 drive shot at 16 km/j pushing a taxi.
+    game.cars = game.cars.filter((c) => c.owner !== 'traffic' || Math.hypot(c.x + 60, c.z - 240) > 90);
+    const traffic = [
+      ['sedan', 15, 236, Math.PI / 2], ['taxi', 55, 236, Math.PI / 2], ['van', 100, 236, Math.PI / 2],
+      ['hatch', 20, 244, -Math.PI / 2], ['bajaj', 65, 244, -Math.PI / 2], ['sedan', -35, 244, -Math.PI / 2],
+    ];
+    for (const [model, x, z, heading] of traffic) {
+      const t = createCar(model, x, z, heading, null, 'traffic');
+      t.node = -1;
+      game.cars.push(t);
+    }
+    // Sidewalk crowd by the warung carts.
+    spawnCrowd(game.peds, 10, 250, 6, R);
+    fixedSteps(120, (i) => {
       const c = game.playerCar;
-      if (c) driveCar(c, 1, Math.sin(i / 40) * 0.35, 1 / 60, game.city.colliders, game.allCars);
+      if (c) roadPilot(c, 240, i, game.city.colliders, game.allCars);
     });
+    // Pose the chase for the frame: two patrol cars head-on ahead in both
+    // lanes, helicopter low and ahead so it is actually in the frame.
+    const px = game.playerCar.x, pz = game.playerCar.z;
+    if (game.police.cops[0]) {
+      const c = game.police.cops[0];
+      c.x = px + 34; c.z = 236; c.heading = -Math.PI / 2; c.speed = 12;
+    }
+    if (game.police.cops[1]) {
+      const c = game.police.cops[1];
+      c.x = px + 55; c.z = 244; c.heading = -Math.PI / 2; c.speed = 12;
+    }
+    game.police.heli = { x: px + 32, z: pz + 28, y: 13, angle: 0.5 };
+    game.refreshHud();
     game.shotFrozen = true;
     return;
   }
   if (kind === 'mission') {
-    // On foot in the market, pistol out, gang members closing in.
-    // Camera yaw equals the player heading: the camera sits behind Raka
-    // and looks where he faces, toward the market and the gang.
+    // Golden-hour fight in the market: Raka on foot, pistol out, Gang Sanca
+    // closing in — two already down, so the HUD counter reads "Usir 2/5".
+    // Uses the real mission (m7 "Perang Gang"), not hand-placed actors.
+    game.setLighting('golden');
+    game.dayMinutes = 17 * 60 + 20; // 17:20, low sun over the market
     game.player.x = -2;
     game.player.z = 10;
     game.player.heading = Math.PI;
     game.camera.yaw = Math.PI;
     game.weapons.current = 'pistol';
     game.weapons.hasShotgun = true;
-    game.missions.objective = 'Usir 5 anggota Gang Sanca dari Pasar Malam';
-    game.missions.marker = { x: 0, z: 0, radius: 12, label: 'Lawan' };
-    const gangSpots = [[4, -8], [9, -11], [-2, -12], [12, -4], [-8, -6]];
-    for (let i = 0; i < 5; i++) {
-      const ped = createPed(gangSpots[i][0], gangSpots[i][1], R, 'gang');
-      ped.name = 'Gang Sanca';
-      ped.weapon = 'pistol';
-      ped.shootTimer = 2;
-      game.peds.push(ped);
-      game.missions.spawnedPeds.push(ped);
-    }
+    game.missions.startMission(6); // m7, stage 1: defeat 5 gang at market
+    game.missions.banner = null; // keep the transient title banner out of the frozen frame
+    // Market shoppers caught in the fight.
+    spawnCrowd(game.peds, 24, 18, 5, R);
     // A parked hero car and a taxi for street life.
     const taxi = createCar('taxi', 12, 14, 1.2, null, 'traffic');
     game.cars.push(taxi);
     fixedSteps(90);
+    // Two gang members already down: mid-fight, counter at 2/5.
+    const gang = game.missions.spawnedPeds;
+    for (let i = 0; i < 2 && i < gang.length; i++) {
+      gang[i].dead = true;
+      gang[i].deadAt = game.time;
+    }
+    game.player.health = 82;
+    game.player.armour = 40;
+    game.money = 1250;
+    game.refreshHud(); // sync the DOM counter ("Usir 2/5") and vitals
+    game.shotFrozen = true;
+    return;
+  }
+  if (kind === 'drive') {
+    // Night drive: Raka in the gold Panther GT on Jalan Merdeka (z = 200),
+    // wanted 2, lamps and headlights carrying the scene.
+    game.setLighting('night');
+    game.dayMinutes = 21 * 60 + 30; // 21:30
+    const car = createCar('sport', -120, 200, Math.PI / 2, [0.95, 0.8, 0.15], 'player');
+    car.engine = 1;
+    game.cars.push(car);
+    game.playerCar = car;
+    game.player.x = car.x;
+    game.player.z = car.z;
+    game.police.addHeat(40, 'Tersangka melaju di Jalan Merdeka');
+    game.missions.objective = 'Jelajahi Jalan Merdeka di malam hari';
+    game.missions.marker = { x: 120, z: 200, radius: 9, label: 'Jalan Merdeka' };
+    // Same staging hygiene as the chase: clear random traffic from the
+    // stretch, then lay out this shot's traffic in the two lanes.
+    game.cars = game.cars.filter((c) => c.owner !== 'traffic' || Math.hypot(c.x + 120, c.z - 200) > 90);
+    const traffic = [
+      ['sedan', 10, 196, Math.PI / 2], ['taxi', 55, 196, Math.PI / 2], ['bajaj', 95, 196, Math.PI / 2],
+      ['hatch', 0, 204, -Math.PI / 2], ['van', 50, 204, -Math.PI / 2],
+    ];
+    for (const [model, x, z, heading] of traffic) {
+      const t = createCar(model, x, z, heading, null, 'traffic');
+      t.node = -1;
+      game.cars.push(t);
+    }
+    spawnCrowd(game.peds, -40, 208, 5, R);
+    fixedSteps(150, (i) => {
+      const c = game.playerCar;
+      if (c) roadPilot(c, 200, i, game.city.colliders, game.allCars);
+    });
+    game.refreshHud();
+    game.shotFrozen = true;
+    return;
+  }
+  if (kind === 'map') {
+    // The map screen: golden-hour city behind the panel, 5 of 8 missions
+    // done, 4 of 12 statues found, slot 1 holding a real save made here.
+    game.setLighting('golden');
+    game.dayMinutes = 17 * 60 + 48;
+    game.money = 2450;
+    game.respect = 87;
+    game.missions.done = ['m1', 'm2', 'm3', 'm4', 'm5'];
+    game.missions.index = 5;
+    game.missions.objective = 'Misi 6: Malam di Tanjung menanti.';
+    for (let i = 0; i < 4; i++) game.statues[i].taken = true;
+    fixedSteps(30);
+    saveGame(game.saveState(), 1);
+    game.toggleMap();
     game.shotFrozen = true;
     return;
   }

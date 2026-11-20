@@ -4,19 +4,30 @@
 // hud.js shows it.
 
 import { Rng, hashString } from './rng.js';
-import { clamp, lerp, angleDiff, dist2D, mat4Perspective, mat4LookAt } from './math.js';
+import { clamp, lerp, angleDiff, dist2D, smoothstep, mat4Perspective, mat4LookAt } from './math.js';
 import { Renderer } from './renderer.js';
 import { buildCity, resolveCollisions, nearestRoadPoint } from './city.js';
 import { Input } from './input.js';
 import { AudioSys } from './audio.js';
 import { Hud } from './hud.js';
-import { createCar, driveCar, updateTraffic, drawCar, CAR_MODELS } from './vehicles.js';
-import { createPed, updatePed, wanderTarget, drawPed } from './peds.js';
+import { createCar, driveCar, updateTraffic, drawCar, conditionLabel, CAR_MODELS } from './vehicles.js';
+import { createPed, updatePed, wanderTarget, spawnCrowd, drawPed } from './peds.js';
 import { PoliceSys } from './police.js';
 import { MissionSys, MISSIONS } from './missions.js';
-import { saveGame, loadGame, hasSave, clearSave } from './save.js';
+import { saveGame, loadGame, hasSave, clearSave, saveSlotInfo } from './save.js';
 
 const RAKA = { shirt: [0.85, 0.25, 0.22], pants: [0.20, 0.22, 0.30], skin: [0.85, 0.65, 0.50] };
+
+// Twelve golden "Patung Tanjung" statues hidden near the city's landmarks:
+// the collectible the map screen counts (X/12). Fixed spots, no RNG.
+const STATUE_SPOTS = [
+  { near: 'home', dx: -8, dz: 6 }, { near: 'garage', dx: 8, dz: -6 },
+  { near: 'market', dx: 14, dz: 10 }, { near: 'market', dx: -14, dz: -10 },
+  { near: 'harbor', dx: -20, dz: -8 }, { near: 'beach', dx: 10, dz: -6 },
+  { near: 'villa', dx: 6, dz: 10 }, { near: 'safehouse', dx: -8, dz: 8 },
+  { near: 'oldtown', dx: 10, dz: 6 }, { near: 'taxiStand', dx: -8, dz: -8 },
+  { near: 'raceStart', dx: 8, dz: -8 }, { near: 'gangHQ', dx: -10, dz: 10 },
+];
 
 export class Game {
   constructor(canvas, opts = {}) {
@@ -26,13 +37,17 @@ export class Game {
     this.city = buildCity(this.seed);
     this.renderer = new Renderer(canvas);
     this.renderer.setStatic(this.city.mesh);
+    this.lighting = 'day';
+    this.renderer.setLighting('day');
+    // In-game clock: starts 10:15, one game minute every two real seconds.
+    this.dayMinutes = 10 * 60 + 15;
     this.input = new Input(canvas);
     this.audio = new AudioSys();
     this.hud = new Hud();
     this.police = new PoliceSys(this.city, this.rng);
     this.missions = new MissionSys(this.city, this.rng);
 
-    this.state = 'title'; // title | playing | paused | garage | gameover | complete
+    this.state = 'title'; // title | playing | paused | map | garage | gameover | complete
     this.time = 0;
     this.money = 300;
     this.respect = 0;
@@ -60,9 +75,38 @@ export class Game {
     this.damageCooldown = 0;
 
     this.spawnWorld();
+    this.statues = STATUE_SPOTS.map((s, i) => {
+      const l = this.city.locations[s.near];
+      return { id: i, x: l.x + s.dx, z: l.z + s.dz, taken: false };
+    });
     this.bindMenus();
     this.hud.showTitle(hasSave(), (a) => this.titleAction(a));
     this.hud.setRadio(this.audio.currentStation(), true);
+    // M / Esc closes the map screen (update() is paused while it is open,
+    // so the normal key handling never sees the press).
+    window.addEventListener('keydown', (e) => {
+      if (this.state === 'map' && (e.code === 'KeyM' || e.code === 'Escape')) {
+        this.state = 'playing';
+        this.hud.hideMenu();
+        this.hud.minimap.style.display = '';
+        this.input.poll();
+      }
+    });
+  }
+
+  // Switch the lighting preset and remember it (staging uses 'golden' /
+  // 'night'; normal play stays on 'day').
+  setLighting(preset) {
+    this.lighting = preset;
+    this.renderer.setLighting(preset);
+  }
+
+  // "17:48 · Sore" for the HUD clock and the map screen.
+  clockText() {
+    const mins = Math.floor(this.dayMinutes) % (24 * 60);
+    const hh = Math.floor(mins / 60), mm = mins % 60;
+    const part = hh < 11 ? 'Pagi' : hh < 15 ? 'Siang' : hh < 18 ? 'Sore' : 'Malam';
+    return `${String(hh).padStart(2, '0')}:${String(mm).padStart(2, '0')} · ${part}`;
   }
 
   // ---- World setup ----
@@ -70,7 +114,7 @@ export class Game {
     const roads = this.city.roads;
     // Parked cars along the streets.
     const parkedModels = ['sedan', 'hatch', 'sport', 'van', 'truck', 'sedan', 'hatch'];
-    for (let i = 0; i < 12; i++) {
+    for (let i = 0; i < 18; i++) {
       const rx = roads[1 + Math.floor(this.rng.float() * (roads.length - 2))];
       const rz = roads[1 + Math.floor(this.rng.float() * (roads.length - 2))];
       const alongRoad = this.rng.float() < 0.5;
@@ -80,17 +124,18 @@ export class Game {
       const car = createCar(model, x, z, this.rng.float() * Math.PI * 2, null, 'parked');
       this.cars.push(car);
     }
-    // Traffic.
-    const trafficModels = ['sedan', 'hatch', 'van', 'taxi', 'sedan', 'truck', 'hatch'];
-    for (let i = 0; i < 14; i++) {
+    // Traffic. Sedans and hatches are the common cars; trucks and bajaj
+    // are rarer, so the mix reads like a real Indonesian street.
+    for (let i = 0; i < 26; i++) {
       const rx = roads[Math.floor(this.rng.float() * roads.length)];
       const rz = roads[Math.floor(this.rng.float() * roads.length)];
-      const car = createCar(trafficModels[i % trafficModels.length], rx, rz, this.rng.float() * Math.PI * 2, null, 'traffic');
+      const model = this.rng.weightedPick([['sedan', 3], ['hatch', 2], ['van', 2], ['taxi', 2], ['truck', 1], ['bajaj', 2]]);
+      const car = createCar(model, rx, rz, this.rng.float() * Math.PI * 2, null, 'traffic');
       car.node = -1;
       this.cars.push(car);
     }
     // Pedestrians.
-    for (let i = 0; i < 24; i++) {
+    for (let i = 0; i < 48; i++) {
       const x = (this.rng.float() - 0.5) * 460;
       const z = (this.rng.float() - 0.5) * 460;
       const ped = createPed(x, z, this.rng, 'walker');
@@ -134,9 +179,61 @@ export class Game {
 
   pauseAction(action) {
     if (action === 'resume') { this.state = 'playing'; this.hud.hideMenu(); }
+    else if (action === 'map') { this.toggleMap(); }
     else if (action === 'save') { saveGame(this.saveState()); this.hud.showPause((a) => this.pauseAction(a)); }
     else if (action === 'settings') this.hud.showSettings(this.settings, (a, v) => this.settingsAction(a, v, 'pause'));
     else if (action === 'quit') { this.state = 'title'; this.hud.showTitle(hasSave(), (a) => this.titleAction(a)); }
+  }
+
+  // ---- Map screen (M) ----
+  toggleMap() {
+    if (this.state === 'map') {
+      this.state = 'playing';
+      this.hud.hideMenu();
+      this.hud.minimap.style.display = '';
+      this.input.poll();
+      return;
+    }
+    if (this.state !== 'playing' && this.state !== 'paused') return;
+    this.state = 'map';
+    // The small minimap is empty while the map is open (it only draws while
+    // playing), so hide it instead of showing a dead black box.
+    this.hud.minimap.style.display = 'none';
+    this.hud.showMap(this.mapData(), (a) => this.mapAction(a));
+  }
+
+  mapData() {
+    return {
+      missions: this.missions.progressList(),
+      money: this.money,
+      respect: this.respect,
+      statuesTaken: this.statues.filter((s) => s.taken).length,
+      statuesTotal: this.statues.length,
+      slots: [saveSlotInfo(1), saveSlotInfo(2)],
+      clock: this.clockText(),
+      mapState: {
+        roads: this.city.roads,
+        colliders: this.city.colliders,
+        marker: this.missions.marker,
+        police: this.police.cops,
+        traffic: this.cars.filter((c) => c.owner === 'traffic'),
+        player: this.player,
+        time: this.time,
+      },
+    };
+  }
+
+  mapAction(action) {
+    if (action === 'resume') {
+      this.state = 'playing';
+      this.hud.hideMenu();
+      this.input.poll();
+    } else if (action === 'save-1' || action === 'save-2') {
+      const slot = action === 'save-1' ? 1 : 2;
+      saveGame(this.saveState(), slot);
+      // Re-show so the slot line updates to the save just made.
+      this.hud.showMap(this.mapData(), (a) => this.mapAction(a));
+    }
   }
 
   garageAction(action) {
@@ -172,6 +269,9 @@ export class Game {
     this.weapons = s.weapons;
     this.audio.station = s.radioStation ?? 0;
     this.ownedCars = s.ownedCars ?? [];
+    this.dayMinutes = s.dayMinutes ?? 615;
+    const taken = new Set(s.collectedStatues ?? []);
+    this.statues.forEach((st) => { st.taken = taken.has(st.id); });
     Object.assign(this.settings, s.settings ?? {});
   }
 
@@ -180,7 +280,9 @@ export class Game {
       money: this.money, respect: this.respect, missionIndex: this.missions.index,
       missionsDone: this.missions.done, player: this.player, garage: this.garage,
       weapons: this.weapons, radioStation: this.audio.station, ownedCars: this.ownedCars,
-      settings: this.settings,
+      settings: this.settings, dayMinutes: this.dayMinutes,
+      statuesTaken: this.statues.filter((s) => s.taken).length,
+      collectedStatues: this.statues.filter((s) => s.taken).map((s) => s.id),
     };
   }
 
@@ -317,6 +419,16 @@ export class Game {
         return;
       }
     }
+    // Collect a Patung Tanjung statue.
+    for (const s of this.statues) {
+      if (!s.taken && dist2D(this.player.x, this.player.z, s.x, s.z) < 3.5) {
+        s.taken = true;
+        this.audio.blip(1200, 0.15);
+        const got = this.statues.filter((q) => q.taken).length;
+        this.hud.setPrompt(`Patung Tanjung ${got}/${this.statues.length}!`);
+        return;
+      }
+    }
     if (this.playerCar) {
       // Exit the car.
       const car = this.playerCar;
@@ -408,8 +520,9 @@ export class Game {
   // ---- Update ----
   update(dt) {
     if (this.state === 'title' || this.state === 'gameover' || this.state === 'complete') return;
-    if (this.state === 'paused' || this.state === 'garage') return;
+    if (this.state === 'paused' || this.state === 'garage' || this.state === 'map') return;
     this.time += dt;
+    this.dayMinutes += dt * 0.5; // one game minute every two real seconds
     const input = this.input;
     const axis = input.axis();
     const mouse = input.consumeMouse();
@@ -420,6 +533,12 @@ export class Game {
     if (input.wasPressed('Escape')) {
       this.state = 'paused';
       this.hud.showPause((a) => this.pauseAction(a));
+      input.poll();
+      return;
+    }
+    // Map screen (M).
+    if (input.consumePressed('KeyM')) {
+      this.toggleMap();
       input.poll();
       return;
     }
@@ -544,14 +663,39 @@ export class Game {
     this.updatePrompt();
 
     // ---- HUD ----
-    this.hud.setStatus({ health: this.player.health, armour: this.player.armour, money: this.money, respect: this.respect });
-    this.hud.setWanted(this.police.wanted);
-    this.hud.setObjective(this.missions.objective, this.missions.timer > 0 ? this.missions.timer : null);
-    this.hud.setSpeed(this.playerCar ? Math.abs(this.playerCar.speed) * 3.6 : 0, !!this.playerCar, this.playerCar ? this.playerCar.def.name : '');
-    this.hud.setFeed(this.police.feed);
+    this.refreshHud();
     this.audio.update();
 
     input.poll();
+  }
+
+  // Every HUD setter in one place, called each frame from update() and once
+  // after screenshot staging poses the world, so the frozen frame's DOM
+  // (counter, clock, money) matches the posed state instead of the last
+  // simulated step.
+  refreshHud() {
+    this.hud.setStatus({ health: this.player.health, armour: this.player.armour, money: this.money, respect: this.respect });
+    this.hud.setWanted(this.police.wanted);
+    this.hud.setClock(this.clockText());
+    const mm = this.missions;
+    this.hud.setMissionInfo(
+      mm.active ? `Misi ${mm.index + 1}/8 · Tahap ${mm.active.stage + 1}/${mm.active.mission.stages.length} · ${mm.active.mission.title}` : 'Mode Bebas — Jelajahi Tanjung Matahari',
+      mm.counterText(),
+    );
+    this.hud.setDialogue(mm.currentDialogue());
+    this.hud.setSpeed(
+      this.playerCar ? Math.abs(this.playerCar.speed) * 3.6 : 0,
+      !!this.playerCar,
+      this.playerCar ? this.playerCar.def.name : '',
+      this.playerCar ? `${conditionLabel(this.playerCar)} ${Math.max(0, Math.round(this.playerCar.hp))}%` : '',
+    );
+    this.hud.setPoliceInfo(this.police.wanted > 0 ? this.police.unitsWithDistance(this.player) : []);
+    // The survive stage's countdown already shows in the counter
+    // ("44 dtk tersisa"); the objective timer would print it twice.
+    const stage = mm.active ? mm.active.mission.stages[mm.active.stage] : null;
+    const timer = stage && stage.type === 'survive' ? null : (this.missions.timer > 0 ? this.missions.timer : null);
+    this.hud.setObjective(this.missions.objective, timer);
+    this.hud.setFeed(this.police.feed);
   }
 
   updateHostile(ped, dt) {
@@ -588,6 +732,9 @@ export class Game {
     for (const c of this.missions.collectibles) {
       if (!c.taken && dist2D(this.player.x, this.player.z, c.x, c.z) < 3.5) { this.hud.setPrompt('E — Ambil peti'); return; }
     }
+    for (const s of this.statues) {
+      if (!s.taken && dist2D(this.player.x, this.player.z, s.x, s.z) < 3.5) { this.hud.setPrompt('E — Ambil Patung Tanjung'); return; }
+    }
     const g = this.city.locations.garage;
     if (dist2D(this.player.x, this.player.z, g.x, g.z) < 10) { this.hud.setPrompt('E — Bengkel Tanjung (upgrade mobil)'); return; }
     if (!this.missions.active && !this.missions.sideJob && this.missions.index < MISSIONS.length) {
@@ -612,7 +759,11 @@ export class Game {
 
     // Camera.
     let camTarget, camPos;
-    if (this.shotMode === 'city') {
+    if (this.shotMode === 'map') {
+      // High view over the city for the map screen backdrop.
+      camPos = [150, 130, 400];
+      camTarget = [0, 0, 60];
+    } else if (this.shotMode === 'city') {
       camPos = [180, 150, 420];
       camTarget = [0, 0, 40];
     } else if (this.state === 'title') {
@@ -624,7 +775,12 @@ export class Game {
       const px = this.player.x, pz = this.player.z;
       const dist = this.playerCar ? 14 : 10;
       const height = this.playerCar ? 5.5 : 4.2;
-      const yaw = this.playerCar ? this.player.heading + Math.PI : this.camera.yaw;
+      // The camera looks along the direction of travel, from behind the
+      // car: yaw is the heading itself. (v1 used heading + PI, which put
+      // the camera in front of the car looking back — the drive shot
+      // showed the road the car had already left, and everything staged
+      // "ahead" of it sat behind the camera.)
+      const yaw = this.playerCar ? this.player.heading : this.camera.yaw;
       const fx = Math.sin(yaw), fz = Math.cos(yaw);
       const tx = px, tz = pz;
       camPos = [tx - fx * dist, height, tz - fz * dist];
@@ -642,12 +798,34 @@ export class Game {
     const r = this.renderer;
     r.begin(proj, view, dt);
 
-    // Mission marker column.
+    // Mission marker: a small floating diamond that bobs and spins, a flat
+    // disc under it, and a thin dashed route line from the player to it.
+    // (The old 20-unit beam is gone: it filled the whole mission shot.)
     const marker = this.missions.marker;
     if (marker && this.state === 'playing') {
-      const pulse = 1 + Math.sin(this.time * 4) * 0.15;
-      r.box(marker.x, 10, marker.z, 1.0 * pulse, 20, 1.0 * pulse, 0, this.time, 0, [1.0, 0.85, 0.2], 2);
-      r.box(marker.x, 0.4, marker.z, marker.radius * 1.0, 0.8, marker.radius * 1.0, 0, this.time * 0.5, 0, [1.0, 0.85, 0.2], 2);
+      const bob = Math.sin(this.time * 3) * 0.4;
+      const pulse = 1 + smoothstep(0, 1, (Math.sin(this.time * 4) + 1) / 2) * 0.15;
+      r.box(marker.x, 4.2 + bob, marker.z, 1.0 * pulse, 1.0 * pulse, 1.0 * pulse, Math.PI / 4, this.time * 1.5, 0, [1.0, 0.85, 0.2], 2);
+      r.box(marker.x, 0.25, marker.z, 3.2, 0.5, 3.2, 0, 0, 0, [1.0, 0.85, 0.2], 2);
+      const px = this.player.x, pz = this.player.z;
+      const dx = marker.x - px, dz = marker.z - pz;
+      const dist = Math.hypot(dx, dz);
+      if (dist > 14) {
+        const steps = Math.min(24, Math.floor(dist / 7));
+        const ang = Math.atan2(dx, dz);
+        // Start at the second dash: the first sits under the camera and
+        // reads as a slab, not a line.
+        for (let i = 2; i <= steps; i++) {
+          const t = i / (steps + 1);
+          r.box(px + dx * t, 0.15, pz + dz * t, 0.7, 0.12, 3.2, 0, ang, 0, [1.0, 0.85, 0.2], 2);
+        }
+      }
+    }
+    // Patung Tanjung statues (golden, gently spinning).
+    for (const s of this.statues) {
+      if (s.taken) continue;
+      r.box(s.x, 0.5, s.z, 1.6, 1.0, 1.6, 0, 0, 0, [0.5, 0.45, 0.4]);
+      r.box(s.x, 1.8, s.z, 0.9, 1.8, 0.9, 0, this.time * 0.4, 0, [0.95, 0.8, 0.25], 2);
     }
     // Collectible crates.
     for (const c of this.missions.collectibles) {

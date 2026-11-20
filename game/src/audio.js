@@ -28,6 +28,15 @@ const STATIONS = [
     notes: [0, 0, 12, 0, 10, 0, 7, 0, 5, 7, 10, 12, 10, 7, 5, 3],
     bpm: 150, wave: 'square', base: 165,
   },
+  {
+    id: 'senja',
+    name: 'Senja FM',
+    genre: 'Dangdut Senja',
+    tracks: ['Senja di Tanjung — Siti Tanjung', 'Ombak Pelan — Dangdut 88', 'Lampu Pasar — Raka Band'],
+    // Slow, swaying line for the golden hour: long notes, low base.
+    notes: [0, 7, 0, 5, 0, 3, 0, 0, 0, 7, 0, 10, 7, 5, 3, 0],
+    bpm: 104, wave: 'sine', base: 185,
+  },
 ];
 
 export class AudioSys {

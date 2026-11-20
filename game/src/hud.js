@@ -34,24 +34,27 @@ export class Hud {
     this.root.innerHTML = `
       <div id="vignette"></div>
       <div id="status">
-        <div class="bar"><span class="label">NYAWA</span><div class="track"><div id="hp" class="fill hp"></div></div></div>
-        <div class="bar"><span class="label">ROMPI</span><div class="track"><div id="armour" class="fill armour"></div></div></div>
+        <div class="bar"><span class="label">NYAWA</span><div class="track"><div id="hp" class="fill hp"></div></div><span class="num" id="hpNum">100</span></div>
+        <div class="bar"><span class="label">ROMPI</span><div class="track"><div id="armour" class="fill armour"></div></div><span class="num" id="armourNum">0</span></div>
         <div id="money">$0</div>
         <div id="respect">Anak Baru</div>
       </div>
       <div id="wanted"></div>
-      <div id="objective"><div id="objText"></div><div id="objTimer"></div></div>
+      <div id="clock"></div>
+      <div id="objective"><div id="stageLine"></div><div id="objText"></div><div id="objCounter"></div><div id="objTimer"></div></div>
       <div id="feed"></div>
+      <div id="policeInfo"></div>
       <div id="prompt"></div>
+      <div id="dialogue"></div>
       <div id="banner"><div id="bannerTitle"></div><div id="bannerSub"></div></div>
-      <div id="speed"><span id="speedNum">0</span><span id="speedUnit">km/j</span><div id="carName"></div></div>
+      <div id="speed"><span id="speedNum">0</span><span id="speedUnit">km/j</span><div id="carName"></div><div id="carCond"></div></div>
       <div id="radio"></div>
       <div id="wheel"></div>
       <canvas id="minimap" width="220" height="220"></canvas>
       <div id="menu"></div>
     `;
     this.el = {};
-    for (const id of ['hp', 'armour', 'money', 'respect', 'wanted', 'objText', 'objTimer', 'feed', 'prompt', 'banner', 'bannerTitle', 'bannerSub', 'speed', 'speedNum', 'carName', 'radio', 'wheel', 'menu', 'vignette']) {
+    for (const id of ['hp', 'armour', 'hpNum', 'armourNum', 'money', 'respect', 'wanted', 'clock', 'stageLine', 'objText', 'objCounter', 'objTimer', 'feed', 'policeInfo', 'prompt', 'dialogue', 'banner', 'bannerTitle', 'bannerSub', 'speed', 'speedNum', 'carName', 'carCond', 'radio', 'wheel', 'menu', 'vignette']) {
       this.el[id] = this.root.querySelector('#' + id);
     }
   }
@@ -59,8 +62,40 @@ export class Hud {
   setStatus({ health, armour, money, respect }) {
     this.el.hp.style.width = Math.max(0, health) + '%';
     this.el.armour.style.width = Math.max(0, armour) + '%';
+    this.el.hpNum.textContent = Math.round(Math.max(0, health));
+    this.el.armourNum.textContent = Math.round(Math.max(0, armour));
     this.el.money.textContent = '$' + Math.floor(money).toLocaleString('en-US');
     this.el.respect.textContent = respectRank(respect) + '  ·  ' + respect + ' respect';
+  }
+
+  // In-game clock: "17:48 · Sore". The game clock starts at 10:15 and runs
+  // one game minute every two real seconds.
+  setClock(text) {
+    this.el.clock.textContent = text;
+  }
+
+  // "Misi 6/8 · Tahap 1/2 · Malam di Tanjung" and the stage counter
+  // ("Usir 2/5"). Empty strings hide the line; free roam shows its own line.
+  setMissionInfo(stageLine, counter) {
+    this.el.stageLine.textContent = stageLine ?? '';
+    this.el.stageLine.style.display = stageLine ? 'block' : 'none';
+    this.el.objCounter.textContent = counter ?? '';
+    this.el.objCounter.style.display = counter ? 'block' : 'none';
+  }
+
+  // One spoken line under the screen while a mission runs; hidden otherwise.
+  setDialogue(text) {
+    this.el.dialogue.textContent = text ?? '';
+    this.el.dialogue.style.display = text ? 'block' : 'none';
+  }
+
+  // Nearest chasing units with distance, e.g. "Elang-1 · 38 m".
+  setPoliceInfo(units) {
+    if (!units || units.length === 0) {
+      this.el.policeInfo.innerHTML = '';
+      return;
+    }
+    this.el.policeInfo.innerHTML = units.map((u) => `<div class="policeLine">${u.name} · ${u.dist} m</div>`).join('');
   }
 
   setWanted(n) {
@@ -74,10 +109,11 @@ export class Hud {
     this.el.objTimer.textContent = timer !== null && timer > 0 ? Math.ceil(timer) + ' dtk' : '';
   }
 
-  setSpeed(kmh, inCar, carName = '') {
+  setSpeed(kmh, inCar, carName = '', condition = '') {
     this.el.speed.style.display = inCar ? 'block' : 'none';
     this.el.speedNum.textContent = Math.round(kmh);
     this.el.carName.textContent = carName;
+    this.el.carCond.textContent = condition ? `Kondisi: ${condition}` : '';
   }
 
   setRadio(station, on) {
@@ -116,7 +152,13 @@ export class Hud {
 
   // ---- Minimap ----
   drawMinimap(state) {
-    const c = this.mm, S = 220, half = 300;
+    this.drawMapInto(this.mm, 220, state);
+  }
+
+  // The same map drawing at any size: the 220px HUD minimap and the big
+  // canvas on the map screen share this, so both always agree.
+  drawMapInto(c, S, state) {
+    const half = 300;
     const toMap = (x, z) => [(x + half) / (half * 2) * S, (z + half) / (half * 2) * S];
     c.clearRect(0, 0, S, S);
     c.fillStyle = 'rgba(10, 30, 25, 0.85)';
@@ -218,7 +260,7 @@ export class Hud {
           <p><b>W A S D</b> — jalan / gas, rem, belok &nbsp;·&nbsp; <b>Mouse</b> — putar kamera (tahan &amp; seret)</p>
           <p><b>E</b> — masuk/keluar mobil, ambil peti, mulai kerja &nbsp;·&nbsp; <b>Shift</b> — lari</p>
           <p><b>F</b> — pukul &nbsp;·&nbsp; <b>Klik kiri</b> — tembak &nbsp;·&nbsp; <b>Q (tahan)</b> — roda senjata, <b>1/2/3</b> — ganti senjata</p>
-          <p><b>R</b> — ganti stasiun radio &nbsp;·&nbsp; <b>Spasi</b> — rem tangan &nbsp;·&nbsp; <b>Esc</b> — jeda</p>
+          <p><b>R</b> — ganti stasiun radio &nbsp;·&nbsp; <b>Spasi</b> — rem tangan &nbsp;·&nbsp; <b>Esc</b> — jeda &nbsp;·&nbsp; <b>M</b> — peta &amp; misi</p>
           <p>Curi mobil, kerjakan 8 misi cerita Raka, naikkan respect, dan hindari polisi. Bintang 4 ke atas: helikopter ikut mengejar. Bintang 5: blokade jalan.</p>
           <p>Simpan otomatis setiap misi selesai. Uang dipakai untuk upgrade mobil di Bengkel Tanjung.</p>
         </div>
@@ -253,11 +295,56 @@ export class Hud {
         <h2>Jeda</h2>
         <div class="btns">
           <button data-a="resume">Lanjutkan</button>
+          <button data-a="map">Peta &amp; Misi (M)</button>
           <button data-a="save">Simpan Sekarang</button>
           <button data-a="settings">Pengaturan</button>
           <button data-a="quit">Keluar ke Menu Utama</button>
         </div>
       </div>`);
+    this.el.menu.querySelectorAll('button').forEach((b) => b.addEventListener('click', () => cb(b.dataset.a)));
+  }
+
+  // The map screen (M): a big map of Tanjung, the 8 story missions with
+  // progress, career stats, patung collectibles and the two save slots.
+  // data: {missions, money, respect, statuesTaken, statuesTotal, slots,
+  //        mapState, clock}. cb actions: resume | save-1 | save-2 | close.
+  showMap(data, cb) {
+    const mark = (s) => (s === 'done' ? '✓ SELESAI' : s === 'current' ? '► BERJALAN' : '· TERKUNCI');
+    const slotLine = (s) => {
+      if (s.empty) return `Slot ${s.slot} — Kosong`;
+      const when = s.savedAt ? new Date(s.savedAt).toLocaleString('id-ID', { day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit' }) : '';
+      return `Slot ${s.slot} — Misi ${s.missionIndex + 1}/8 · $${Math.floor(s.money)} · ${s.missionsDone} misi selesai · ${when}`;
+    };
+    this.showMenu(`
+      <div class="panel mapPanel">
+        <h2>PETA TANJUNG MATAHARI</h2>
+        <div class="mapClock">${data.clock ?? ''}</div>
+        <div class="mapGrid">
+          <div class="mapCol">
+            <canvas id="bigmap" width="300" height="300"></canvas>
+          </div>
+          <div class="mapCol">
+            <div class="mapSec"><h3>Misi Cerita — ${data.missions.filter((m) => m.state === 'done').length}/8 selesai</h3>
+              ${data.missions.map((m) => `<div class="mapRow"><span>${m.chapter} — ${m.title}</span><b>${mark(m.state)}</b></div>`).join('')}
+            </div>
+            <div class="mapSec"><h3>Karier Raka</h3>
+              <div class="mapRow"><span>Uang</span><b>$${Math.floor(data.money)}</b></div>
+              <div class="mapRow"><span>Pangkat</span><b>${respectRank(data.respect)} (${data.respect} respect)</b></div>
+              <div class="mapRow"><span>Patung Tanjung</span><b>${data.statuesTaken}/${data.statuesTotal} terkumpul</b></div>
+            </div>
+            <div class="mapSec"><h3>Simpanan</h3>
+              ${data.slots.map((s) => `<div class="mapRow"><span>${slotLine(s)}</span></div>`).join('')}
+            </div>
+          </div>
+        </div>
+        <div class="btns mapBtns">
+          <button data-a="resume">Lanjutkan (M)</button>
+          <button data-a="save-1">Simpan ke Slot 1</button>
+          <button data-a="save-2">Simpan ke Slot 2</button>
+        </div>
+      </div>`);
+    const big = this.el.menu.querySelector('#bigmap');
+    if (big && data.mapState) this.drawMapInto(big.getContext('2d'), 300, data.mapState);
     this.el.menu.querySelectorAll('button').forEach((b) => b.addEventListener('click', () => cb(b.dataset.a)));
   }
 

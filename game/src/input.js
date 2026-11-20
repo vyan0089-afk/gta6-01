@@ -45,6 +45,13 @@ export class Input {
 
   down(code) { return this.keys.has(code); }
   wasPressed(code) { return this.pressed.has(code); }
+  // True once for a key pressed since the last poll(), then consumed so a
+  // menu toggle (M for the map) cannot fire twice from one press.
+  consumePressed(code) {
+    if (!this.pressed.has(code)) return false;
+    this.pressed.delete(code);
+    return true;
+  }
   // WASD or arrows.
   axis() {
     let x = 0, y = 0;

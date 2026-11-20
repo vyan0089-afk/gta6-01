@@ -14,6 +14,7 @@ uniform mat4 uProj;
 uniform mat4 uView;
 uniform vec3 uSun;
 uniform float uTime;
+uniform float uAmbient;
 varying vec3 vColor;
 varying float vLight;
 varying float vDepth;
@@ -27,7 +28,7 @@ void main() {
   vDepth = -view.z;
   vMisc = aMisc;
   float diff = max(dot(normalize(aNormal), normalize(uSun)), 0.0);
-  vLight = 0.62 + 0.55 * diff;
+  vLight = uAmbient + 0.55 * diff;
   vColor = aColor;
 }
 `;
@@ -112,6 +113,19 @@ export class MeshBuilder {
   toFloat32() { return new Float32Array(this.data); }
 }
 
+// Lighting presets. The sun direction, fog colour, sky colour, ambient
+// floor and fog range are fixed per preset, so a golden-hour or night shot
+// is the same every run: no time-of-day randomness, only a chosen preset.
+export const LIGHTING_PRESETS = {
+  // Bright midday, the default for normal play.
+  day: { sun: [0.55, 0.85, 0.35], fog: [0.72, 0.84, 0.92], clear: [0.45, 0.72, 0.92], ambient: 0.62, fogRange: [320, 1100] },
+  // Low warm sun from the west, orange haze: 17:45 on Jalan Pantai.
+  golden: { sun: [0.92, 0.28, 0.18], fog: [0.98, 0.62, 0.38], clear: [0.99, 0.60, 0.34], ambient: 0.58, fogRange: [260, 950] },
+  // Dark blue night: lamps, headlights and neon carry the scene. Ambient
+  // stays high enough that streets and cars still read at a glance.
+  night: { sun: [0.25, 0.55, 0.30], fog: [0.10, 0.12, 0.22], clear: [0.08, 0.11, 0.22], ambient: 0.42, fogRange: [200, 800] },
+};
+
 function compile(gl, type, src) {
   const sh = gl.createShader(type);
   gl.shaderSource(sh, src);
@@ -140,12 +154,12 @@ export class Renderer {
     this.uView = gl.getUniformLocation(prog, 'uView');
     this.uSun = gl.getUniformLocation(prog, 'uSun');
     this.uTime = gl.getUniformLocation(prog, 'uTime');
+    this.uAmbient = gl.getUniformLocation(prog, 'uAmbient');
     this.uFogColor = gl.getUniformLocation(prog, 'uFogColor');
     this.uFogRange = gl.getUniformLocation(prog, 'uFogRange');
     gl.useProgram(prog);
-    gl.uniform3f(this.uSun, 0.55, 0.85, 0.35);
-    gl.uniform3f(this.uFogColor, 0.72, 0.84, 0.92);
-    gl.uniform2f(this.uFogRange, 320, 1100);
+    this.lighting = 'day';
+    this.setLighting('day');
     gl.enable(gl.DEPTH_TEST);
     gl.enable(gl.CULL_FACE);
     gl.cullFace(gl.BACK);
@@ -155,6 +169,14 @@ export class Renderer {
     this.dynCount = 0;
     this.dynBuf = gl.createBuffer();
     this.time = 0;
+  }
+
+  // Switch the lighting preset ('day', 'golden' or 'night'). The uniforms
+  // are applied in begin(), so a preset change takes effect next frame.
+  setLighting(name) {
+    const p = LIGHTING_PRESETS[name] ?? LIGHTING_PRESETS.day;
+    this.lighting = LIGHTING_PRESETS[name] ? name : 'day';
+    this._preset = p;
   }
 
   resize(w, h) {
@@ -198,8 +220,13 @@ export class Renderer {
     const gl = this.gl;
     this.time += dt;
     this.dynCount = 0;
-    gl.clearColor(0.45, 0.72, 0.92, 1);
+    const p = this._preset ?? LIGHTING_PRESETS.day;
+    gl.clearColor(p.clear[0], p.clear[1], p.clear[2], 1);
     gl.clear(gl.COLOR_BUFFER_BIT | gl.DEPTH_BUFFER_BIT);
+    gl.uniform3f(this.uSun, p.sun[0], p.sun[1], p.sun[2]);
+    gl.uniform3f(this.uFogColor, p.fog[0], p.fog[1], p.fog[2]);
+    gl.uniform2f(this.uFogRange, p.fogRange[0], p.fogRange[1]);
+    gl.uniform1f(this.uAmbient, p.ambient);
     gl.uniformMatrix4fv(this.uProj, false, new Float32Array(mat4Transpose(proj)));
     gl.uniformMatrix4fv(this.uView, false, new Float32Array(mat4Transpose(view)));
     gl.uniform1f(this.uTime, this.time);

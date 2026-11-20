@@ -102,7 +102,15 @@ export function mat4Dir(m, d) {
 }
 
 export function clamp(v, a, b) { return v < a ? a : v > b ? b : v; }
+export function clamp01(v) { return v < 0 ? 0 : v > 1 ? 1 : v; }
 export function lerp(a, b, t) { return a + (b - a) * t; }
+// Smooth 0..1 ramp between edges a and b; used for marker pulses and fades.
+export function smoothstep(a, b, t) {
+  const x = clamp01((t - a) / (b - a));
+  return x * x * (3 - 2 * x);
+}
+// Shortest-path interpolation between two headings, in radians.
+export function lerpAngle(a, b, t) { return a + angleDiff(a, b) * clamp01(t); }
 export function dist2D(ax, az, bx, bz) { return Math.hypot(ax - bx, az - bz); }
 // Shortest signed angle difference, in [-PI, PI].
 export function angleDiff(a, b) {

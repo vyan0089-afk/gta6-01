@@ -48,6 +48,21 @@ export function wanderTarget(ped, roads, rng) {
   }
 }
 
+// Drop a small crowd of strolling pedestrians around (x, z): used by the
+// screenshot staging to put sidewalk life where the camera looks, and by
+// the market at rush hour. Returns the peds it created.
+export function spawnCrowd(peds, x, z, n, rng, role = 'walker') {
+  const made = [];
+  for (let i = 0; i < n; i++) {
+    const ped = createPed(x + (rng.float() - 0.5) * 24, z + (rng.float() - 0.5) * 16, rng, role);
+    ped.targetX = x + (rng.float() - 0.5) * 40;
+    ped.targetZ = z + (rng.float() - 0.5) * 24;
+    peds.push(ped);
+    made.push(ped);
+  }
+  return made;
+}
+
 export function updatePed(ped, dt, ctx) {
   if (ped.dead) return;
   const { colliders, roads, rng, danger } = ctx;

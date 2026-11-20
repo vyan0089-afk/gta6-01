@@ -32,6 +32,18 @@ export class Rng {
   // [min, max] integers
   int(min, max) { return min + Math.floor(this.next() * (max - min + 1)); }
   pick(arr) { return arr[Math.floor(this.next() * arr.length)]; }
+  // Weighted pick: entries are [value, weight]; heavier entries win more often.
+  // Used for traffic mix, so sedans outnumber trucks on Tanjung's streets.
+  weightedPick(entries) {
+    let total = 0;
+    for (const [, w] of entries) total += w;
+    let roll = this.next() * total;
+    for (const [value, w] of entries) {
+      roll -= w;
+      if (roll <= 0) return value;
+    }
+    return entries[entries.length - 1][0];
+  }
   chance(p) { return this.next() < p; }
   // Fisher-Yates shuffle, returns a new array.
   shuffle(arr) {

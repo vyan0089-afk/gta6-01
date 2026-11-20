@@ -100,6 +100,48 @@ export const SIDE_JOBS = {
   race: { title: 'Balap Liar', briefing: 'Lima gerbang, waktu tercepat menang.', reward: 200 },
 };
 
+// One spoken line per mission stage, shown under the objective while the
+// mission runs. Raka talks to himself; Pak Haji runs the garage; Sari
+// hosts the evening radio. Short, in Indonesian, no more than a sentence.
+export const DIALOGUE = {
+  m1: [
+    'Raka: Sedan itu parkir di Pasar Malam. Ambil diam-diam.',
+    'Raka: Kuncinya masih nempel. Rezeki anak soleh.',
+    'Raka: Bengkel Tanjung tinggal lurus. Jangan bikin baret.',
+  ],
+  m2: [
+    'Raka: Paketnya sudah di tangan. Pelabuhan, 100 detik!',
+    'Raka: Jalan pantai paling cepat. Gaspol!',
+  ],
+  m3: [
+    'Raka: Garis start di Pantai Matahari. Jangan malu-maluin.',
+    'Raka: Lima gerbang. Yang paling cepat yang namanya naik.',
+  ],
+  m4: [
+    'Raka: Tiga peti di dermaga. Angkat sebelum polisi datang.',
+    'Raka: Peti terakhir. Sekarang kabur!',
+    'Raka: Bintang dua nempel terus. Rumah Aman, cepat!',
+  ],
+  m5: [
+    'Raka: Penagih utang nunggu di gang Kota Tua. Bereskan.',
+    'Raka: Empat orang. Satu-satu saja.',
+    'Raka: Uangnya sudah di tangan. Pulang, bawa ke rumah.',
+  ],
+  m6: [
+    'Raka: Tiga bintang di belakangku. Tahan 45 detik!',
+    'Raka: Bintang sudah turun. Rumah Aman tinggal sebentar lagi.',
+  ],
+  m7: [
+    'Raka: Gang Sanca menyerbu pasar. Usir mereka semua!',
+    'Raka: Markas mereka di Jalan Gang. Habiskan.',
+  ],
+  m8: [
+    'Raka: Panther GT emas di Vila Bukit. Ini rampokan terakhir.',
+    'Raka: Mobilnya sudah di tangan. Sekarang lari!',
+    'Raka: Bintang lima! Ke Pelabuhan, ke kapal. Ini akhirnya!',
+  ],
+};
+
 export class MissionSys {
   constructor(city, rng) {
     this.city = city;
@@ -123,9 +165,52 @@ export class MissionSys {
 
   showBanner(title, sub) { this.banner = { title, sub, t: 0 }; }
 
+  // The spoken line for the current stage, or '' when no mission runs.
+  currentDialogue() {
+    if (!this.active) return '';
+    const lines = DIALOGUE[this.active.mission.id];
+    if (!lines) return '';
+    return lines[Math.min(this.active.stage, lines.length - 1)] ?? '';
+  }
+
+  // "Usir 2/5", "Peti 1/3", "Gerbang 2/5", "43 dtk tersisa" — the counter
+  // the HUD shows next to the objective. '' when the stage has no count.
+  counterText() {
+    if (!this.active) return '';
+    const stage = this.active.mission.stages[this.active.stage];
+    if (stage.type === 'defeat') {
+      const total = this.spawnedPeds.length;
+      const down = this.spawnedPeds.filter((p) => p.dead).length;
+      return total > 0 ? `Usir ${down}/${total}` : '';
+    }
+    if (stage.type === 'collect') {
+      const total = this.collectibles.length;
+      const got = this.collectibles.filter((c) => c.taken).length;
+      return `Peti ${got}/${total}`;
+    }
+    if (stage.type === 'race') {
+      return `Gerbang ${this.raceIndex}/${stage.points.length}`;
+    }
+    if (stage.type === 'survive') {
+      return `${Math.max(0, Math.ceil(this.timer))} dtk tersisa`;
+    }
+    return '';
+  }
+
+  // Mission list for the map screen: every story mission with its state.
+  progressList() {
+    return MISSIONS.map((m, i) => ({
+      id: m.id,
+      chapter: CHAPTERS[m.chapter],
+      title: m.title,
+      state: this.done.includes(m.id) ? 'done' : i === this.index ? 'current' : i < this.index ? 'done' : 'locked',
+    }));
+  }
+
   startMission(i) {
     const m = MISSIONS[i];
     if (!m) { this.allComplete = true; return; }
+    this.index = i; // the current mission, so the HUD stage line reads Misi 6/8, not 1/8
     this.active = { mission: m, stage: 0, data: {} };
     this.showBanner(`${CHAPTERS[m.chapter]}`, `${m.title} — ${m.briefing}`);
     this.setupStage();

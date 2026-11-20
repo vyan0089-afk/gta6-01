@@ -189,6 +189,19 @@ export function buildCity(seed = 1) {
   // Beach palms.
   for (let t = -240; t <= 240; t += 48) addPalm(mesh, t + 12, 252, rng);
 
+  // ---- Warung carts along Jalan Pantai (the beach road, z = 240) ----
+  // Small food carts with striped awnings on the sea-side sidewalk: the
+  // chase road reads as a night-market street, not an empty boulevard.
+  const warungAwn = [PALETTE.stallRed, PALETTE.stallGreen, PALETTE.wallYellow, PALETTE.stallBlue];
+  for (let i = 0; i < 6; i++) {
+    const wx = -180 + i * 72;
+    const wz = 248;
+    mesh.box(wx, 1.0, wz, 3.2, 2.0, 2.2, 0, 0, 0, PALETTE.pier);
+    mesh.box(wx, 2.2, wz, 3.8, 0.25, 2.8, 0, 0, 0, warungAwn[i % warungAwn.length]);
+    mesh.box(wx, 2.6, wz, 0.5, 0.5, 0.5, 0, 0, 0, PALETTE.lampGlow, 2);
+    colliders.push({ x0: wx - 1.6, z0: wz - 1.1, x1: wx + 1.6, z1: wz + 1.1, h: 2.4 });
+  }
+
   // ---- Street lamps along roads ----
   for (const c of roads) {
     for (let t = -240; t <= 240; t += 80) {

@@ -12,7 +12,19 @@ export const CAR_MODELS = {
   truck: { name: 'Truk Muatan', topSpeed: 18, accel: 8, grip: 1.8, length: 6.5, width: 2.4, colors: [[0.70, 0.45, 0.25], [0.35, 0.45, 0.55]] },
   taxi: { name: 'Taksi Kuning', topSpeed: 25, accel: 13, grip: 2.6, length: 4.4, width: 2.0, colors: [[0.95, 0.80, 0.15]] },
   police: { name: 'Patroli', topSpeed: 32, accel: 18, grip: 3.2, length: 4.6, width: 2.1, colors: [[0.92, 0.92, 0.92]] },
+  // Bajaj: the three-wheeled workhorse of Tanjung's side streets. Same box
+  // body as every car, so it draws and collides like the rest, just shorter.
+  bajaj: { name: 'Bajaj', topSpeed: 16, accel: 11, grip: 3.4, length: 3.0, width: 1.6, colors: [[0.25, 0.65, 0.45], [0.90, 0.55, 0.15]] },
 };
+
+// Plain-language condition from a car's hit points, for the HUD readout.
+export function conditionLabel(car) {
+  if (!car) return '';
+  if (car.hp >= 80) return 'Prima';
+  if (car.hp >= 50) return 'Lecet';
+  if (car.hp > 0) return 'Rusak parah';
+  return 'Mogok';
+}
 
 let nextCarId = 1;
 
