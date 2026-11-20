@@ -5,7 +5,7 @@
 
 import { Game } from './game.js';
 import { createCar, driveCar } from './vehicles.js';
-import { spawnCrowd } from './peds.js';
+import { spawnCrowd, spawnStanders } from './peds.js';
 import { saveGame } from './save.js';
 import { clamp } from './math.js';
 
@@ -34,6 +34,8 @@ try {
   throw e;
 }
 window.__game = game;
+// Debug handle for the shot tooling: which shot and seed staged this page.
+window.__shotInfo = { shot: shot ?? null, seed };
 
 // ---- Deterministic shot staging ---------------------------------------
 // Each shot puts the world in a fixed state, runs the simulation a fixed
@@ -55,6 +57,23 @@ function fixedSteps(n, drive) {
 function roadPilot(car, targetZ, i, colliders, allCars) {
   const steer = clamp((car.z - targetZ) * 0.06, -0.5, 0.5) + Math.sin(i / 20) * 0.08;
   driveCar(car, 1, steer, 1 / 60, colliders, allCars);
+}
+
+// Lay out a shot's own traffic in the two lanes of a road: eastbound cars
+// at z - 4, westbound at z + 4, all offset from the player's centreline so
+// nobody side-swipes the hero car mid-shot.
+function stageTraffic(cars) {
+  for (const [model, x, z, heading] of cars) {
+    const t = createCar(model, x, z, heading, null, 'traffic');
+    t.node = -1;
+    game.cars.push(t);
+  }
+}
+
+// Remove the random traffic from a stretch of road around (x, z), so the
+// staged traffic is the only traffic the camera sees.
+function clearTrafficNear(x, z, radius) {
+  game.cars = game.cars.filter((c) => c.owner !== 'traffic' || Math.hypot(c.x - x, c.z - z) > radius);
 }
 
 function stageShot(kind) {
@@ -89,36 +108,36 @@ function stageShot(kind) {
     game.player.x = car.x;
     game.player.z = car.z;
     game.missions.objective = 'Kabur dari kejaran bintang 4 di Jalan Pantai';
-    // Clear random traffic from the staged stretch, then lay out the shot's
-    // own traffic in the two lanes (eastbound z=236, westbound z=244):
-    // four units off the player's centreline, so cars pass without the
-    // side-swipe that stalled the v1 drive shot at 16 km/j pushing a taxi.
-    game.cars = game.cars.filter((c) => c.owner !== 'traffic' || Math.hypot(c.x + 60, c.z - 240) > 90);
-    const traffic = [
+    clearTrafficNear(-60, 240, 90);
+    stageTraffic([
       ['sedan', 15, 236, Math.PI / 2], ['taxi', 55, 236, Math.PI / 2], ['van', 100, 236, Math.PI / 2],
       ['hatch', 20, 244, -Math.PI / 2], ['bajaj', 65, 244, -Math.PI / 2], ['sedan', -35, 244, -Math.PI / 2],
-    ];
-    for (const [model, x, z, heading] of traffic) {
-      const t = createCar(model, x, z, heading, null, 'traffic');
-      t.node = -1;
-      game.cars.push(t);
-    }
-    // Sidewalk crowd by the warung carts.
+    ]);
+    // Sidewalk crowd by the warung carts, plus two vendors standing at
+    // their carts watching the chase go past.
     spawnCrowd(game.peds, 10, 250, 6, R);
+    spawnStanders(game.peds, [[-36, 249, Math.PI], [36, 249, Math.PI]], R);
     fixedSteps(120, (i) => {
       const c = game.playerCar;
       if (c) roadPilot(c, 240, i, game.city.colliders, game.allCars);
     });
     // Pose the chase for the frame: two patrol cars head-on ahead in both
     // lanes, helicopter low and ahead so it is actually in the frame.
-    const px = game.playerCar.x, pz = game.playerCar.z;
+    const px = game.playerCar.x;
+    const pz = game.playerCar.z;
     if (game.police.cops[0]) {
       const c = game.police.cops[0];
-      c.x = px + 34; c.z = 236; c.heading = -Math.PI / 2; c.speed = 12;
+      c.x = px + 34;
+      c.z = 236;
+      c.heading = -Math.PI / 2;
+      c.speed = 12;
     }
     if (game.police.cops[1]) {
       const c = game.police.cops[1];
-      c.x = px + 55; c.z = 244; c.heading = -Math.PI / 2; c.speed = 12;
+      c.x = px + 55;
+      c.z = 244;
+      c.heading = -Math.PI / 2;
+      c.speed = 12;
     }
     game.police.heli = { x: px + 32, z: pz + 28, y: 13, angle: 0.5 };
     game.refreshHud();
@@ -172,18 +191,11 @@ function stageShot(kind) {
     game.police.addHeat(40, 'Tersangka melaju di Jalan Merdeka');
     game.missions.objective = 'Jelajahi Jalan Merdeka di malam hari';
     game.missions.marker = { x: 120, z: 200, radius: 9, label: 'Jalan Merdeka' };
-    // Same staging hygiene as the chase: clear random traffic from the
-    // stretch, then lay out this shot's traffic in the two lanes.
-    game.cars = game.cars.filter((c) => c.owner !== 'traffic' || Math.hypot(c.x + 120, c.z - 200) > 90);
-    const traffic = [
+    clearTrafficNear(-120, 200, 90);
+    stageTraffic([
       ['sedan', 10, 196, Math.PI / 2], ['taxi', 55, 196, Math.PI / 2], ['bajaj', 95, 196, Math.PI / 2],
       ['hatch', 0, 204, -Math.PI / 2], ['van', 50, 204, -Math.PI / 2],
-    ];
-    for (const [model, x, z, heading] of traffic) {
-      const t = createCar(model, x, z, heading, null, 'traffic');
-      t.node = -1;
-      game.cars.push(t);
-    }
+    ]);
     spawnCrowd(game.peds, -40, 208, 5, R);
     fixedSteps(150, (i) => {
       const c = game.playerCar;
@@ -211,9 +223,12 @@ function stageShot(kind) {
     return;
   }
   if (kind === 'city') {
-    // Wide postcard view: handled by the camera in render(). Just settle the world.
+    // Wide postcard view: handled by the camera in render(). Settle the
+    // world, then park a few cars on the beach road for the foreground.
     game.time = 30;
     fixedSteps(60);
+    const postcard = createCar('sport', -40, 244, Math.PI / 2, [0.9, 0.15, 0.15], 'parked');
+    game.cars.push(postcard);
     game.shotFrozen = true;
     return;
   }

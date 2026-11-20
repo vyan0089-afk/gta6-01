@@ -1,13 +1,18 @@
-// police.js — the wanted system of Tanjung Matahari. Heat rises with crime,
-// police cars chase on the road graph, a helicopter joins at 4 stars and
-// roadblocks close the city at 5. Dispatch units have names, and their
-// radio chatter shows up in the HUD feed.
+// police.js — the wanted system of Tanjung Matahari.
+//
+// Heat rises with crime: stealing a car, shooting in the open, running a
+// pedestrian down. Heat maps to 1–5 stars; patrol cars chase on the road
+// graph, a helicopter joins at 4 stars, and roadblocks close the city at
+// 5. Dispatch units have names, and their radio chatter shows up in the
+// HUD feed. Stay out of trouble and the heat cools off on its own.
 
 import { clamp, dist2D, angleDiff } from './math.js';
-import { createCar, driveCar, CAR_MODELS } from './vehicles.js';
+import { createCar, driveCar } from './vehicles.js';
 import { nearestRoadPoint } from './city.js';
 
+// Dispatch call signs, handed out in rotation so every cop is somebody.
 const UNITS = ['Elang-1', 'Kancil-2', 'Garuda-3', 'Sanca-4', 'Komodo-5', 'Rajawali-6', 'Banteng-7'];
+
 const DISPATCH_LINES = [
   'Semua unit, tersangka di {place}.',
   'Unit {unit} menuju lokasi, tersangka mengendarai {car}.',
@@ -15,9 +20,32 @@ const DISPATCH_LINES = [
   'Helikopter diminta, tersangka melarikan diri ke arah {place}.',
   'Blokade dipasang di jalan utama. Jangan biarkan lolos.',
   'Tersangka terlihat di {place}. Kejar dengan hati-hati.',
+  'Unit {unit} menutup jalur selatan. Tersangka tidak boleh sampai pelabuhan.',
+  'Semua unit siaga. Tersangka terakhir terlihat di {place}.',
+  'Jangan tembak sembarangan, ada warga di sekitar {place}.',
+  'Unit {unit} minta posisi helikopter di atas {place}.',
 ];
-const PLACES = ['Pasar Malam', 'Pelabuhan', 'Pantai Matahari', 'Kota Tua', 'Bukit Vila', 'Jalan Merdeka', 'Terminal'];
 
+const PLACES = ['Pasar Malam', 'Pelabuhan', 'Pantai Matahari', 'Kota Tua', 'Bukit Vila', 'Jalan Merdeka', 'Terminal', 'Jalan Pantai', 'Bengkel Tanjung', 'Rumah Aman'];
+
+// What the dispatcher calls each wanted level, in plain Indonesian: the
+// HUD shows the label under the stars, so the player feels the heat rise.
+export const WANTED_LABELS = [
+  '',
+  'Buronan Ringan',
+  'Dicari Polisi',
+  'Buronan Berbahaya',
+  'Pengejaran Besar',
+  'Musuh Kota Nomor Satu',
+];
+
+export function wantedLabel(level) {
+  return WANTED_LABELS[Math.max(0, Math.min(5, level))] ?? '';
+}
+
+// Breadth-first search over the road graph: the shortest hop list from
+// one intersection to another. Cops re-path once a second, so they follow
+// the streets instead of driving through buildings.
 function bfsPath(graph, from, to) {
   if (from === to) return [to];
   const prev = new Map([[from, -1]]);
@@ -30,7 +58,10 @@ function bfsPath(graph, from, to) {
       if (nb === to) {
         const path = [to];
         let p = cur;
-        while (p !== -1) { path.unshift(p); p = prev.get(p); }
+        while (p !== -1) {
+          path.unshift(p);
+          p = prev.get(p);
+        }
         return path;
       }
       queue.push(nb);
@@ -43,12 +74,12 @@ export class PoliceSys {
   constructor(city, rng) {
     this.city = city;
     this.rng = rng;
-    this.heat = 0;
+    this.heat = 0; // 0..100; wanted = ceil(heat / 20), capped at 5
     this.wanted = 0;
     this.cops = [];
     this.heli = null;
     this.roadblocks = [];
-    this.feed = [];
+    this.feed = []; // newest first, at most 4 lines
     this.bustTimer = 0;
     this.calmTimer = 0;
     this.repathTimer = 0;
@@ -56,7 +87,9 @@ export class PoliceSys {
     this.unitIndex = 0;
   }
 
-  get level() { return this.wanted; }
+  get level() {
+    return this.wanted;
+  }
 
   addHeat(amount, reason) {
     if (amount <= 0) return;
@@ -64,7 +97,7 @@ export class PoliceSys {
     const w = Math.min(5, Math.ceil(this.heat / 20));
     if (w > this.wanted) {
       this.wanted = w;
-      this.say(`Bintang ${w}: ${reason}`);
+      this.say(`Bintang ${w} (${wantedLabel(w)}): ${reason}`);
       if (w >= 4 && !this.heli) this.heli = { x: 0, z: 0, y: 42, angle: 0 };
     }
     this.calmTimer = 0;
@@ -85,26 +118,29 @@ export class PoliceSys {
   }
 
   nearestNode(x, z) {
-    let best = 0, bestD = Infinity;
+    let best = 0;
+    let bestD = Infinity;
     for (const n of this.city.graph.nodes) {
       const d = dist2D(x, z, n.x, n.z);
-      if (d < bestD) { bestD = d; best = n.id; }
+      if (d < bestD) {
+        bestD = d;
+        best = n.id;
+      }
     }
     return best;
   }
 
   spawnCop(px, pz) {
-    // Spawn on a road 70-120 units away.
+    // Spawn on a road 70-120 units away from the player.
     const a = this.rng.float() * Math.PI * 2;
     const d = 80 + this.rng.float() * 40;
-    let x = px + Math.sin(a) * d;
-    let z = pz + Math.cos(a) * d;
-    x = clamp(x, -250, 250);
-    z = clamp(z, -250, 250);
+    let x = clamp(px + Math.sin(a) * d, -250, 250);
+    let z = clamp(pz + Math.cos(a) * d, -250, 250);
     const rp = nearestRoadPoint(this.city.roads, x, z);
     const car = createCar('police', rp.x, rp.z, this.rng.float() * Math.PI * 2, null, 'police');
+    // Every cop gets its own call sign, not Elang-1 for all of them.
     car.unit = UNITS[this.unitIndex % UNITS.length];
-    this.unitIndex++; // every cop gets its own call sign, not Elang-1 for all
+    this.unitIndex++;
     car.path = [];
     car.pathTimer = 0;
     this.cops.push(car);
@@ -114,7 +150,8 @@ export class PoliceSys {
   // The chasing units nearest the player, for the HUD ("Elang-1 · 38 m").
   // The helicopter reports in too, when it is up.
   unitsWithDistance(player) {
-    const px = player.x, pz = player.z;
+    const px = player.x;
+    const pz = player.z;
     const units = this.cops.map((c, i) => ({
       name: c.unit ?? UNITS[i % UNITS.length],
       dist: Math.round(dist2D(c.x, c.z, px, pz)),
@@ -138,16 +175,22 @@ export class PoliceSys {
       const w = Math.ceil(this.heat / 20);
       if (w < this.wanted) {
         this.wanted = w;
-        if (w === 0) { this.say('Tersangka hilang dari pantauan. Patroli kembali normal.'); this.cops = []; this.heli = null; this.roadblocks = []; }
+        if (w === 0) {
+          this.say('Tersangka hilang dari pantauan. Patroli kembali normal.');
+          this.cops = [];
+          this.heli = null;
+          this.roadblocks = [];
+        }
       }
     }
 
-    // Keep the right number of patrol cars.
+    // Keep the right number of patrol cars on the street: 1 star brings
+    // two, and it climbs to five at the top.
     const want = this.wanted === 0 ? 0 : Math.min(5, 1 + this.wanted);
     while (this.cops.length < want) this.spawnCop(px, pz);
     while (this.cops.length > want) this.cops.pop();
 
-    // Dispatch chatter.
+    // Dispatch chatter, every 9-15 seconds while wanted.
     this.dispatchTimer -= dt;
     if (this.dispatchTimer <= 0 && this.wanted > 0) {
       this.dispatchTimer = 9 + this.rng.float() * 6;
@@ -159,7 +202,7 @@ export class PoliceSys {
       this.say(`${unit}: ${line}`);
     }
 
-    // Chase.
+    // Chase: re-path once a second, then drive toward the next waypoint.
     this.repathTimer -= dt;
     const repath = this.repathTimer <= 0;
     if (repath) this.repathTimer = 1.0;
@@ -181,14 +224,14 @@ export class PoliceSys {
       // Ram the player when close; otherwise drive fast to the waypoint.
       const throttle = distToPlayer < 10 ? 1 : 0.85;
       driveCar(cop, throttle, clamp(diff * 1.8, -1, 1), dt, colliders, ctx.allCars);
-      // Bust: a cop next to the player on foot.
+      // Bust: a cop standing next to the player on foot.
       if (!playerCar && distToPlayer < 4.5) {
         this.bustTimer += dt;
       }
     }
     if (playerCar || this.cops.length === 0) this.bustTimer = Math.max(0, this.bustTimer - dt * 2);
 
-    // Helicopter.
+    // Helicopter: circles the player at 4 stars and above.
     if (this.wanted >= 4 && this.heli) {
       this.heli.angle += dt * 0.5;
       this.heli.x += ((px + Math.sin(this.heli.angle) * 14) - this.heli.x) * Math.min(1, dt * 0.8);
@@ -216,20 +259,19 @@ export class PoliceSys {
     for (const f of this.feed) f.t += dt;
   }
 
-  get busted() { return this.bustTimer > 2.5; }
+  get busted() {
+    return this.bustTimer > 2.5;
+  }
 
+  // Police cars are drawn by game.js through allCars; only the helicopter
+  // draws here: body, tail, spinning rotor, and a searchlight.
   draw(r, time) {
-    for (const cop of this.cops) {
-      // drawCar is imported by game.js; police cars are drawn there via allCars.
-    }
-    if (this.heli) {
-      const h = this.heli;
-      // Body, tail, rotor.
-      r.box(h.x, h.y, h.z, 5.5, 2.2, 3.2, 0, h.angle, 0, [0.15, 0.2, 0.35]);
-      r.box(h.x - Math.sin(h.angle) * 4, h.y + 0.4, h.z - Math.cos(h.angle) * 4, 4, 1, 1.2, 0, h.angle, 0, [0.15, 0.2, 0.35]);
-      const rot = time * 12;
-      r.box(h.x, h.y + 1.4, h.z, 12, 0.15, 0.6, 0, rot, 0, [0.1, 0.1, 0.1]);
-      r.box(h.x, h.y - 1.4, h.z, 0.5, 0.5, 0.5, 0, h.angle, 0, [1.0, 0.95, 0.6], 2);
-    }
+    if (!this.heli) return;
+    const h = this.heli;
+    r.box(h.x, h.y, h.z, 5.5, 2.2, 3.2, 0, h.angle, 0, [0.15, 0.2, 0.35]);
+    r.box(h.x - Math.sin(h.angle) * 4, h.y + 0.4, h.z - Math.cos(h.angle) * 4, 4, 1, 1.2, 0, h.angle, 0, [0.15, 0.2, 0.35]);
+    const rot = time * 12;
+    r.box(h.x, h.y + 1.4, h.z, 12, 0.15, 0.6, 0, rot, 0, [0.1, 0.1, 0.1]);
+    r.box(h.x, h.y - 1.4, h.z, 0.5, 0.5, 0.5, 0, h.angle, 0, [1.0, 0.95, 0.6], 2);
   }
 }

@@ -2,20 +2,25 @@
 // wheel, carjacking, combat, police chases, missions, side jobs, the garage
 // and the save. This file owns the world state; renderer.js draws it and
 // hud.js shows it.
+//
+// The frame is: update(dt) moves the world, render() draws it, and the HUD
+// refreshes from the same state, so what the player sees always matches
+// what the game thinks is true.
 
 import { Rng, hashString } from './rng.js';
-import { clamp, lerp, angleDiff, dist2D, smoothstep, mat4Perspective, mat4LookAt } from './math.js';
+import { clamp, clampAngle, lerp, angleDiff, dist2D, smoothstep, mat4Perspective, mat4LookAt } from './math.js';
 import { Renderer } from './renderer.js';
 import { buildCity, resolveCollisions, nearestRoadPoint } from './city.js';
 import { Input } from './input.js';
 import { AudioSys } from './audio.js';
 import { Hud } from './hud.js';
-import { createCar, driveCar, updateTraffic, drawCar, conditionLabel, CAR_MODELS } from './vehicles.js';
-import { createPed, updatePed, wanderTarget, spawnCrowd, drawPed } from './peds.js';
-import { PoliceSys } from './police.js';
+import { createCar, driveCar, updateTraffic, drawCar, conditionLabel, spawnParkedCar, spawnTrafficCar, CAR_MODELS } from './vehicles.js';
+import { createPed, updatePed, wanderTarget, spawnCrowd, spawnMarketCrowd, scatterNearby, drawPed } from './peds.js';
+import { PoliceSys, wantedLabel } from './police.js';
 import { MissionSys, MISSIONS } from './missions.js';
-import { saveGame, loadGame, hasSave, clearSave, saveSlotInfo } from './save.js';
+import { saveGame, loadGame, hasSave, clearSave, clearAllSaves, saveSlotInfo } from './save.js';
 
+// Raka's look: red shirt, dark trousers, warm skin tone.
 const RAKA = { shirt: [0.85, 0.25, 0.22], pants: [0.20, 0.22, 0.30], skin: [0.85, 0.65, 0.50] };
 
 // Twelve golden "Patung Tanjung" statues hidden near the city's landmarks:
@@ -61,6 +66,8 @@ export class Game {
     this.playerCar = null;
     this.cars = [];
     this.peds = [];
+    // Career stats, shown on the map screen and kept in the save.
+    this.stats = { carsStolen: 0, shotsFired: 0, distanceDriven: 0, foesDown: 0 };
     this.camera = { yaw: 0, pitch: 0.42, dist: 10 };
     this.camPos = [0, 8, -20];
     this.camTarget = [0, 2, 0];
@@ -70,7 +77,6 @@ export class Game {
     this.shootTimer = 0;
     this.muzzle = 0;
     this.stageKey = '';
-    this.bannerShown = false;
     this.interactTarget = null;
     this.damageCooldown = 0;
 
@@ -79,11 +85,11 @@ export class Game {
       const l = this.city.locations[s.near];
       return { id: i, x: l.x + s.dx, z: l.z + s.dz, taken: false };
     });
-    this.bindMenus();
     this.hud.showTitle(hasSave(), (a) => this.titleAction(a));
     this.hud.setRadio(this.audio.currentStation(), true);
-    // M / Esc closes the map screen (update() is paused while it is open,
-    // so the normal key handling never sees the press).
+    // M / Esc closes the map screen. update() is paused while the map is
+    // open, so the normal key handling never sees the press — this listener
+    // catches it instead.
     window.addEventListener('keydown', (e) => {
       if (this.state === 'map' && (e.code === 'KeyM' || e.code === 'Escape')) {
         this.state = 'playing';
@@ -104,38 +110,30 @@ export class Game {
   // "17:48 · Sore" for the HUD clock and the map screen.
   clockText() {
     const mins = Math.floor(this.dayMinutes) % (24 * 60);
-    const hh = Math.floor(mins / 60), mm = mins % 60;
+    const hh = Math.floor(mins / 60);
+    const mm = mins % 60;
     const part = hh < 11 ? 'Pagi' : hh < 15 ? 'Siang' : hh < 18 ? 'Sore' : 'Malam';
     return `${String(hh).padStart(2, '0')}:${String(mm).padStart(2, '0')} · ${part}`;
   }
 
-  // ---- World setup ----
+  // ---- World setup ------------------------------------------------------
+
   spawnWorld() {
     const roads = this.city.roads;
-    // Parked cars along the streets.
+    // Parked cars along the streets, ready to be stolen.
     const parkedModels = ['sedan', 'hatch', 'sport', 'van', 'truck', 'sedan', 'hatch'];
-    for (let i = 0; i < 18; i++) {
-      const rx = roads[1 + Math.floor(this.rng.float() * (roads.length - 2))];
-      const rz = roads[1 + Math.floor(this.rng.float() * (roads.length - 2))];
-      const alongRoad = this.rng.float() < 0.5;
-      const x = alongRoad ? rx + (this.rng.float() < 0.5 ? 7 : -7) : rx + (this.rng.float() - 0.5) * 30;
-      const z = alongRoad ? rz + (this.rng.float() - 0.5) * 30 : rz + (this.rng.float() < 0.5 ? 7 : -7);
-      const model = parkedModels[i % parkedModels.length];
-      const car = createCar(model, x, z, this.rng.float() * Math.PI * 2, null, 'parked');
-      this.cars.push(car);
+    for (let i = 0; i < 20; i++) {
+      this.cars.push(spawnParkedCar(this.rng, roads, parkedModels));
     }
     // Traffic. Sedans and hatches are the common cars; trucks and bajaj
-    // are rarer, so the mix reads like a real Indonesian street.
-    for (let i = 0; i < 26; i++) {
-      const rx = roads[Math.floor(this.rng.float() * roads.length)];
-      const rz = roads[Math.floor(this.rng.float() * roads.length)];
-      const model = this.rng.weightedPick([['sedan', 3], ['hatch', 2], ['van', 2], ['taxi', 2], ['truck', 1], ['bajaj', 2]]);
-      const car = createCar(model, rx, rz, this.rng.float() * Math.PI * 2, null, 'traffic');
-      car.node = -1;
-      this.cars.push(car);
+    // are rarer, so the mix reads like a real Indonesian street. Denser
+    // than v1: the city must never look empty from the driver's seat.
+    const trafficMix = [['sedan', 3], ['hatch', 2], ['van', 2], ['taxi', 2], ['truck', 1], ['bajaj', 2]];
+    for (let i = 0; i < 32; i++) {
+      this.cars.push(spawnTrafficCar(this.rng, roads, trafficMix));
     }
-    // Pedestrians.
-    for (let i = 0; i < 48; i++) {
+    // Pedestrians, scattered across the whole city.
+    for (let i = 0; i < 60; i++) {
       const x = (this.rng.float() - 0.5) * 460;
       const z = (this.rng.float() - 0.5) * 460;
       const ped = createPed(x, z, this.rng, 'walker');
@@ -148,8 +146,7 @@ export class Game {
     return [...this.cars, ...this.police.cops, ...this.police.roadblocks, ...this.missions.spawnedCars];
   }
 
-  // ---- Menus ----
-  bindMenus() { /* menus call back through titleAction / pauseAction */ }
+  // ---- Menus ------------------------------------------------------------
 
   titleAction(action) {
     this.audio.ensure();
@@ -158,34 +155,51 @@ export class Game {
       if (s) this.applySave(s);
       this.startPlaying();
     } else if (action === 'new') {
-      clearSave();
+      clearAllSaves();
       this.startPlaying();
     } else if (action === 'how') {
-      this.hud.showHow((a) => { if (a === 'back') this.hud.showTitle(hasSave(), (x) => this.titleAction(x)); });
+      this.hud.showHow((a) => {
+        if (a === 'back') this.hud.showTitle(hasSave(), (x) => this.titleAction(x));
+      });
     } else if (action === 'settings') {
       this.hud.showSettings(this.settings, (a, v) => this.settingsAction(a, v, 'title'));
     }
   }
 
   settingsAction(action, value, from) {
-    if (action === 'volume') { this.settings.volume = value; if (this.audio.master) this.audio.master.gain.value = value; }
-    else if (action === 'sensitivity') this.settings.sensitivity = value;
-    else if (action === 'music') { this.settings.music = value; this.audio.radioOn = value; }
-    else if (action === 'back') {
+    if (action === 'volume') {
+      this.settings.volume = value;
+      if (this.audio.master) this.audio.master.gain.value = value;
+    } else if (action === 'sensitivity') {
+      this.settings.sensitivity = value;
+    } else if (action === 'music') {
+      this.settings.music = value;
+      this.audio.radioOn = value;
+    } else if (action === 'back') {
       if (from === 'title') this.hud.showTitle(hasSave(), (a) => this.titleAction(a));
       else this.hud.showPause((a) => this.pauseAction(a));
     }
   }
 
   pauseAction(action) {
-    if (action === 'resume') { this.state = 'playing'; this.hud.hideMenu(); }
-    else if (action === 'map') { this.toggleMap(); }
-    else if (action === 'save') { saveGame(this.saveState()); this.hud.showPause((a) => this.pauseAction(a)); }
-    else if (action === 'settings') this.hud.showSettings(this.settings, (a, v) => this.settingsAction(a, v, 'pause'));
-    else if (action === 'quit') { this.state = 'title'; this.hud.showTitle(hasSave(), (a) => this.titleAction(a)); }
+    if (action === 'resume') {
+      this.state = 'playing';
+      this.hud.hideMenu();
+    } else if (action === 'map') {
+      this.toggleMap();
+    } else if (action === 'save') {
+      saveGame(this.saveState());
+      this.hud.showPause((a) => this.pauseAction(a));
+    } else if (action === 'settings') {
+      this.hud.showSettings(this.settings, (a, v) => this.settingsAction(a, v, 'pause'));
+    } else if (action === 'quit') {
+      this.state = 'title';
+      this.hud.showTitle(hasSave(), (a) => this.titleAction(a));
+    }
   }
 
-  // ---- Map screen (M) ----
+  // ---- Map screen (M) ----------------------------------------------------
+
   toggleMap() {
     if (this.state === 'map') {
       this.state = 'playing';
@@ -205,10 +219,12 @@ export class Game {
   mapData() {
     return {
       missions: this.missions.progressList(),
+      nextMission: this.missions.nextMission(),
       money: this.money,
       respect: this.respect,
       statuesTaken: this.statues.filter((s) => s.taken).length,
       statuesTotal: this.statues.length,
+      stats: this.stats,
       slots: [saveSlotInfo(1), saveSlotInfo(2)],
       clock: this.clockText(),
       mapState: {
@@ -237,12 +253,19 @@ export class Game {
   }
 
   garageAction(action) {
-    if (action === 'close') { this.state = 'playing'; this.hud.hideMenu(); return; }
+    if (action === 'close') {
+      this.state = 'playing';
+      this.hud.hideMenu();
+      return;
+    }
     const kind = action.replace('buy-', '');
     const costs = { engine: 400 * (this.garage.engine + 1), armour: 350 * (this.garage.armour + 1), paint: 200 };
     const maxes = { engine: 3, armour: 3, paint: 1 };
     if (this.garage[kind] >= maxes[kind]) return;
-    if (this.money < costs[kind]) { this.hud.setPrompt('Uang tidak cukup!'); return; }
+    if (this.money < costs[kind]) {
+      this.hud.setPrompt('Uang tidak cukup!');
+      return;
+    }
     this.money -= costs[kind];
     this.garage[kind]++;
     if (this.playerCar) {
@@ -270,17 +293,28 @@ export class Game {
     this.audio.station = s.radioStation ?? 0;
     this.ownedCars = s.ownedCars ?? [];
     this.dayMinutes = s.dayMinutes ?? 615;
+    if (s.stats) Object.assign(this.stats, s.stats);
     const taken = new Set(s.collectedStatues ?? []);
-    this.statues.forEach((st) => { st.taken = taken.has(st.id); });
+    this.statues.forEach((st) => {
+      st.taken = taken.has(st.id);
+    });
     Object.assign(this.settings, s.settings ?? {});
   }
 
   saveState() {
     return {
-      money: this.money, respect: this.respect, missionIndex: this.missions.index,
-      missionsDone: this.missions.done, player: this.player, garage: this.garage,
-      weapons: this.weapons, radioStation: this.audio.station, ownedCars: this.ownedCars,
-      settings: this.settings, dayMinutes: this.dayMinutes,
+      money: this.money,
+      respect: this.respect,
+      missionIndex: this.missions.index,
+      missionsDone: this.missions.done,
+      player: this.player,
+      garage: this.garage,
+      weapons: this.weapons,
+      radioStation: this.audio.station,
+      ownedCars: this.ownedCars,
+      settings: this.settings,
+      dayMinutes: this.dayMinutes,
+      stats: { ...this.stats },
       statuesTaken: this.statues.filter((s) => s.taken).length,
       collectedStatues: this.statues.filter((s) => s.taken).map((s) => s.id),
     };
@@ -295,10 +329,12 @@ export class Game {
     this.hud.setObjective(this.missions.objective);
   }
 
-  // ---- Combat ----
+  // ---- Combat -----------------------------------------------------------
+
   damagePlayer(amount, source) {
     if (this.state !== 'playing') return;
     const now = this.time;
+    // A short invulnerability window so one burst cannot stack.
     if (now - this.damageCooldown < 0.25) return;
     this.damageCooldown = now;
     let rest = amount;
@@ -318,11 +354,14 @@ export class Game {
     if (this.punchTimer > 0 || this.playerCar) return;
     this.punchTimer = 0.4;
     this.audio.blip(180, 0.1, 'square', 0.25);
-    const fx = Math.sin(this.player.heading), fz = Math.cos(this.player.heading);
+    const fx = Math.sin(this.player.heading);
+    const fz = Math.cos(this.player.heading);
     for (const ped of this.peds) {
       if (ped.dead) continue;
-      const dx = ped.x - this.player.x, dz = ped.z - this.player.z;
+      const dx = ped.x - this.player.x;
+      const dz = ped.z - this.player.z;
       const d = Math.hypot(dx, dz);
+      // In range and roughly in front of Raka.
       if (d < 2.4 && (dx * fx + dz * fz) / Math.max(d, 0.01) > 0.3) {
         ped.hp -= 30;
         if (ped.hp <= 0) this.killPed(ped);
@@ -333,25 +372,34 @@ export class Game {
   shoot() {
     if (this.shootTimer > 0 || this.playerCar) return;
     const w = this.weapons.current;
-    if (w === 'fists') { this.punch(); return; }
+    if (w === 'fists') {
+      this.punch();
+      return;
+    }
     if (w === 'pistol' && this.weapons.pistolAmmo <= 0) return;
     if (w === 'shotgun' && this.weapons.shotgunAmmo <= 0) return;
     this.shootTimer = w === 'shotgun' ? 0.7 : 0.22;
     this.muzzle = 0.08;
     if (w === 'pistol') this.weapons.pistolAmmo--;
     else this.weapons.shotgunAmmo--;
+    this.stats.shotsFired++;
     this.audio.gunshot();
-    const fx = Math.sin(this.player.heading), fz = Math.cos(this.player.heading);
     const pellets = w === 'shotgun' ? 5 : 1;
     for (let p = 0; p < pellets; p++) {
       const spread = (p - (pellets - 1) / 2) * 0.06 + (this.rng.float() - 0.5) * 0.03;
-      const dx = Math.sin(this.player.heading + spread), dz = Math.cos(this.player.heading + spread);
-      let best = null, bestD = w === 'shotgun' ? 26 : 42;
+      const dx = Math.sin(this.player.heading + spread);
+      const dz = Math.cos(this.player.heading + spread);
+      let best = null;
+      let bestD = w === 'shotgun' ? 26 : 42;
       for (const ped of this.peds) {
         if (ped.dead) continue;
-        const rx = ped.x - this.player.x, rz = ped.z - this.player.z;
+        const rx = ped.x - this.player.x;
+        const rz = ped.z - this.player.z;
         const d = Math.hypot(rx, rz);
-        if (d < bestD && (rx * dx + rz * dz) / Math.max(d, 0.01) > 0.985) { best = ped; bestD = d; }
+        if (d < bestD && (rx * dx + rz * dz) / Math.max(d, 0.01) > 0.985) {
+          best = ped;
+          bestD = d;
+        }
       }
       if (best) {
         best.hp -= w === 'shotgun' ? 22 : 34;
@@ -360,20 +408,20 @@ export class Game {
     }
     // Scare nearby peds and raise a little heat when shooting in the open.
     this.police.addHeat(2, 'Tembakan terdengar');
-    for (const ped of this.peds) {
-      if (dist2D(ped.x, ped.z, this.player.x, this.player.z) < 30) ped.flee = 2;
-    }
+    scatterNearby(this.peds, this.player.x, this.player.z, 30);
   }
 
   killPed(ped) {
     ped.dead = true;
+    ped.deadAt = this.time;
     if (ped.role === 'walker') {
+      // Killing a bystander is the fastest way to five stars.
       this.police.addHeat(30, 'Warga tewas');
-      this.money += 0;
     } else {
       // Hostiles drop cash.
       const drop = 30 + Math.floor(this.rng.float() * 50);
       this.money += drop;
+      this.stats.foesDown++;
       this.hud.setPrompt(`+$${drop} dari ${ped.name ?? 'musuh'}`);
     }
   }
@@ -396,25 +444,30 @@ export class Game {
     });
   }
 
-  // ---- Interaction (E) ----
+  // ---- Interaction (E) ---------------------------------------------------
+
   nearestCar(maxD = 4) {
-    let best = null, bestD = maxD;
+    let best = null;
+    let bestD = maxD;
     for (const car of this.allCars) {
       if (car.owner === 'police') continue;
       const d = dist2D(this.player.x, this.player.z, car.x, car.z);
-      if (d < bestD) { bestD = d; best = car; }
+      if (d < bestD) {
+        bestD = d;
+        best = car;
+      }
     }
     return best;
   }
 
   interact() {
     if (this.state !== 'playing') return;
-    // Collect a crate.
     const m = this.missions;
+    // Collect a crate.
     for (const c of m.collectibles) {
       if (!c.taken && dist2D(this.player.x, this.player.z, c.x, c.z) < 3.5) {
         c.taken = true;
-        this.audio.blip(1200, 0.15);
+        this.audio.pickup();
         this.hud.setPrompt('Peti diambil!');
         return;
       }
@@ -423,14 +476,14 @@ export class Game {
     for (const s of this.statues) {
       if (!s.taken && dist2D(this.player.x, this.player.z, s.x, s.z) < 3.5) {
         s.taken = true;
-        this.audio.blip(1200, 0.15);
+        this.audio.pickup();
         const got = this.statues.filter((q) => q.taken).length;
         this.hud.setPrompt(`Patung Tanjung ${got}/${this.statues.length}!`);
         return;
       }
     }
     if (this.playerCar) {
-      // Exit the car.
+      // Exit the car, stepping out to the left.
       const car = this.playerCar;
       this.player.x = car.x - Math.cos(car.heading) * 2.5;
       this.player.z = car.z + Math.sin(car.heading) * 2.5;
@@ -445,9 +498,9 @@ export class Game {
       this.playerCar = car;
       if (stolen) {
         this.police.addHeat(25, 'Mobil dicuri');
+        this.stats.carsStolen++;
         car.owner = 'player';
         this.cars = this.cars.filter((c) => c !== car);
-        if (car.missionTarget) car.missionTarget = true;
       }
       this.audio.blip(520, 0.1);
       return;
@@ -459,7 +512,7 @@ export class Game {
       this.hud.showGarage(this.garage, this.money, (a) => this.garageAction(a));
       return;
     }
-    // Mission start marker.
+    // Mission start marker: stand at home to begin the next story mission.
     if (!m.active && !m.sideJob && this.missions.index < MISSIONS.length) {
       const start = this.city.locations.home;
       if (dist2D(this.player.x, this.player.z, start.x, start.z) < 12) {
@@ -467,7 +520,8 @@ export class Game {
         return;
       }
     }
-    // Side jobs.
+    // Side jobs at their stands: taxi and race at their starts, courier
+    // work from the market.
     if (!m.active && !m.sideJob) {
       const taxi = this.city.locations.taxiStand;
       if (dist2D(this.player.x, this.player.z, taxi.x, taxi.z) < 8) {
@@ -479,10 +533,16 @@ export class Game {
         m.startSideJob('race', this.player);
         return;
       }
+      const market = this.city.locations.market;
+      if (dist2D(this.player.x, this.player.z, market.x, market.z) < 8) {
+        m.startSideJob('delivery', this.player);
+        return;
+      }
     }
   }
 
-  // ---- Mission staging (spawns for the current stage) ----
+  // ---- Mission staging (spawns for the current stage) --------------------
+
   stageMissionSpawns() {
     const m = this.missions;
     if (!m.active) return;
@@ -507,8 +567,11 @@ export class Game {
         m.spawnedPeds.push(ped);
         this.peds.push(ped);
       }
+      // A few shoppers caught in the fight, who will run when it starts.
+      spawnMarketCrowd(this.peds, l.x + 20, l.z + 12, 3, this.rng);
     }
     if (stage.type === 'survive' || stage.type === 'escape') {
+      // Make sure the wanted level the stage demands is actually there.
       if (this.police.wanted < (stage.wanted ?? 1)) {
         this.police.heat = (stage.wanted ?? 1) * 20;
         this.police.wanted = stage.wanted ?? 1;
@@ -517,7 +580,8 @@ export class Game {
     }
   }
 
-  // ---- Update ----
+  // ---- Update ------------------------------------------------------------
+
   update(dt) {
     if (this.state === 'title' || this.state === 'gameover' || this.state === 'complete') return;
     if (this.state === 'paused' || this.state === 'garage' || this.state === 'map') return;
@@ -542,41 +606,52 @@ export class Game {
       input.poll();
       return;
     }
-    // Weapon wheel.
-    if (input.down('KeyQ')) {
-      this.hud.showWheel(this.weapons.current);
+    // Weapon wheel: hold Q, then 1/2/3 — or just press 1/2/3 directly.
+    const pickWeapon = () => {
       if (input.wasPressed('Digit1')) this.weapons.current = 'fists';
       if (input.wasPressed('Digit2') && this.weapons.hasPistol) this.weapons.current = 'pistol';
       if (input.wasPressed('Digit3') && this.weapons.hasShotgun) this.weapons.current = 'shotgun';
+    };
+    if (input.down('KeyQ')) {
+      this.hud.showWheel(this.weapons.current, { pistol: this.weapons.pistolAmmo, shotgun: this.weapons.shotgunAmmo });
+      pickWeapon();
     } else {
       this.hud.hideWheel();
-      if (input.wasPressed('Digit1')) this.weapons.current = 'fists';
-      if (input.wasPressed('Digit2') && this.weapons.hasPistol) this.weapons.current = 'pistol';
-      if (input.wasPressed('Digit3') && this.weapons.hasShotgun) this.weapons.current = 'shotgun';
+      pickWeapon();
     }
     // Radio.
     if (input.wasPressed('KeyR')) {
       const st = this.audio.nextStation();
       this.hud.setRadio(st, this.audio.radioOn);
-      this.audio.blip(660, 0.08);
+      this.audio.stationJingle();
+    }
+    // Horn: a short honk while driving, just for the joy of it.
+    if (input.wasPressed('KeyH') && this.playerCar) {
+      this.audio.blip(370, 0.25, 'square', 0.18);
+      this.audio.blip(440, 0.25, 'square', 0.12);
     }
     if (input.wasPressed('KeyE')) this.interact();
     if (input.wasPressed('KeyF')) this.punch();
-    if (input.mouseDown && input.down('Mouse0') !== undefined) { /* click handled below */ }
-    if (input.clicked) this.shoot();
+    if (input.consumeClick()) this.shoot();
     if (this.punchTimer > 0) this.punchTimer -= dt;
     if (this.shootTimer > 0) this.shootTimer -= dt;
     if (this.muzzle > 0) this.muzzle -= dt;
 
     // ---- Player movement ----
-    const camFwdX = Math.sin(this.camera.yaw), camFwdZ = Math.cos(this.camera.yaw);
-    const camRightX = Math.cos(this.camera.yaw), camRightZ = -Math.sin(this.camera.yaw);
+    const camFwdX = Math.sin(this.camera.yaw);
+    const camFwdZ = Math.cos(this.camera.yaw);
+    const camRightX = Math.cos(this.camera.yaw);
+    const camRightZ = -Math.sin(this.camera.yaw);
     if (this.playerCar) {
       const car = this.playerCar;
       const throttle = axis.y;
       let steer = -axis.x;
-      if (input.down('Space')) { car.speed *= Math.max(0, 1 - dt * 3); steer *= 1.4; }
+      if (input.down('Space')) {
+        car.speed *= Math.max(0, 1 - dt * 3);
+        steer *= 1.4;
+      }
       driveCar(car, throttle, steer, dt, this.city.colliders, this.allCars);
+      this.stats.distanceDriven += Math.abs(car.speed) * dt;
       this.player.x = car.x;
       this.player.z = car.z;
       this.player.heading = car.heading;
@@ -612,7 +687,7 @@ export class Game {
       this.audio.setSiren(this.police.wanted > 0);
     }
 
-    // Health regen after calm.
+    // Health regen after ten calm seconds.
     if (this.time - this.player.lastDamage > 10 && this.player.health > 0 && this.player.health < 100) {
       this.player.health = Math.min(100, this.player.health + 2 * dt);
     }
@@ -620,7 +695,9 @@ export class Game {
     // ---- Traffic & pedestrians ----
     const others = this.allCars;
     for (const car of this.cars) {
-      if (car.owner === 'traffic') updateTraffic(car, { ...this.city.graph, roads: this.city.roads }, dt, this.city.colliders, others, this.rng);
+      if (car.owner === 'traffic') {
+        updateTraffic(car, { ...this.city.graph, roads: this.city.roads }, dt, this.city.colliders, others, this.rng);
+      }
     }
     const danger = this.police.wanted > 0 ? { x: this.player.x, z: this.player.z } : null;
     for (const ped of this.peds) {
@@ -630,9 +707,9 @@ export class Game {
         updatePed(ped, dt, { colliders: this.city.colliders, roads: this.city.roads, rng: this.rng, danger });
       }
     }
-    this.peds = this.peds.filter((p) => !p.dead || p.role !== 'walker' || this.time - (p.deadAt ?? 0) < 30);
-    // Mark death time for cleanup.
-    for (const ped of this.peds) if (ped.dead && ped.deadAt === undefined) ped.deadAt = this.time;
+    // Dead walkers linger on the ground for a while, then fade out of the
+    // world. Mission hostiles stay until the stage ends.
+    this.peds = this.peds.filter((p) => !p.dead || p.role !== 'walker' || this.time - (p.deadAt ?? this.time) < 30);
 
     // ---- Police ----
     this.police.update(dt, { player: this.player, playerCar: this.playerCar, colliders: this.city.colliders, allCars: others });
@@ -645,11 +722,16 @@ export class Game {
     if (reward) {
       this.money += reward.money;
       this.respect += reward.respect;
-      this.audio.blip(1320, 0.2);
+      this.audio.missionJingle();
       saveGame(this.saveState());
       if (this.missions.allComplete && this.state === 'playing') {
         this.state = 'complete';
-        this.hud.showComplete((a) => { if (a === 'free') { this.state = 'playing'; this.hud.hideMenu(); } });
+        this.hud.showComplete((a) => {
+          if (a === 'free') {
+            this.state = 'playing';
+            this.hud.hideMenu();
+          }
+        });
       } else if (this.missions.index < MISSIONS.length && !this.missions.active && !this.missions.sideJob) {
         this.missions.startMission(this.missions.index);
       }
@@ -659,10 +741,8 @@ export class Game {
       this.missions.banner = null;
     }
 
-    // ---- Interaction prompt ----
+    // ---- Interaction prompt & HUD ----
     this.updatePrompt();
-
-    // ---- HUD ----
     this.refreshHud();
     this.audio.update();
 
@@ -676,13 +756,18 @@ export class Game {
   refreshHud() {
     this.hud.setStatus({ health: this.player.health, armour: this.player.armour, money: this.money, respect: this.respect });
     this.hud.setWanted(this.police.wanted);
+    this.hud.setWantedLabel(wantedLabel(this.police.wanted));
     this.hud.setClock(this.clockText());
     const mm = this.missions;
     this.hud.setMissionInfo(
-      mm.active ? `Misi ${mm.index + 1}/8 · Tahap ${mm.active.stage + 1}/${mm.active.mission.stages.length} · ${mm.active.mission.title}` : 'Mode Bebas — Jelajahi Tanjung Matahari',
+      mm.active
+        ? `Misi ${mm.index + 1}/8 · Tahap ${mm.active.stage + 1}/${mm.active.mission.stages.length} · ${mm.active.mission.title}`
+        : 'Mode Bebas — Jelajahi Tanjung Matahari',
       mm.counterText(),
     );
-    this.hud.setDialogue(mm.currentDialogue());
+    // In free roam Raka mutters to himself, a new line every 12 seconds.
+    const freeRoamIndex = mm.active ? -1 : Math.floor(this.time / 12);
+    this.hud.setDialogue(mm.currentDialogue(freeRoamIndex));
     this.hud.setSpeed(
       this.playerCar ? Math.abs(this.playerCar.speed) * 3.6 : 0,
       !!this.playerCar,
@@ -698,20 +783,19 @@ export class Game {
     this.hud.setFeed(this.police.feed);
   }
 
+  // A hostile ped: walk toward the player, shoot when in range.
   updateHostile(ped, dt) {
     if (ped.dead) return;
     const d = dist2D(ped.x, ped.z, this.player.x, this.player.z);
     if (d > 60) return; // dormant until the player is near
     const want = Math.atan2(this.player.x - ped.x, this.player.z - ped.z);
-    let diff = want - ped.heading;
-    while (diff > Math.PI) diff -= Math.PI * 2;
-    while (diff < -Math.PI) diff += Math.PI * 2;
-    ped.heading += clamp(diff, -3 * dt, 3 * dt);
+    ped.heading += clamp(clampAngle(want - ped.heading), -3 * dt, 3 * dt);
     if (d > 8) {
       const nx = ped.x + Math.sin(ped.heading) * 3.4 * dt;
       const nz = ped.z + Math.cos(ped.heading) * 3.4 * dt;
       const [rx, rz] = resolveCollisions(this.city.colliders, nx, nz, 0.6);
-      ped.x = rx; ped.z = rz;
+      ped.x = rx;
+      ped.z = rz;
     }
     ped.shootTimer -= dt;
     if (ped.shootTimer <= 0 && d < 30) {
@@ -722,35 +806,63 @@ export class Game {
   }
 
   updatePrompt() {
-    if (this.playerCar) { this.hud.setPrompt('E — Keluar dari mobil'); return; }
+    if (this.playerCar) {
+      this.hud.setPrompt('E — Keluar dari mobil');
+      return;
+    }
     const car = this.nearestCar();
     if (car) {
       const label = car.missionTarget ? 'Mobil target' : car.def.name;
-      this.hud.setPrompt(`E — Masuk ${label}${car.owner === 'parked' || car.owner === 'traffic' ? ' (mencuri = bintang)' : ''}`);
+      const stealNote = car.owner === 'parked' || car.owner === 'traffic' ? ' (mencuri = bintang)' : '';
+      this.hud.setPrompt(`E — Masuk ${label}${stealNote}`);
       return;
     }
     for (const c of this.missions.collectibles) {
-      if (!c.taken && dist2D(this.player.x, this.player.z, c.x, c.z) < 3.5) { this.hud.setPrompt('E — Ambil peti'); return; }
+      if (!c.taken && dist2D(this.player.x, this.player.z, c.x, c.z) < 3.5) {
+        this.hud.setPrompt('E — Ambil peti');
+        return;
+      }
     }
     for (const s of this.statues) {
-      if (!s.taken && dist2D(this.player.x, this.player.z, s.x, s.z) < 3.5) { this.hud.setPrompt('E — Ambil Patung Tanjung'); return; }
+      if (!s.taken && dist2D(this.player.x, this.player.z, s.x, s.z) < 3.5) {
+        this.hud.setPrompt('E — Ambil Patung Tanjung');
+        return;
+      }
     }
     const g = this.city.locations.garage;
-    if (dist2D(this.player.x, this.player.z, g.x, g.z) < 10) { this.hud.setPrompt('E — Bengkel Tanjung (upgrade mobil)'); return; }
+    if (dist2D(this.player.x, this.player.z, g.x, g.z) < 10) {
+      this.hud.setPrompt('E — Bengkel Tanjung (upgrade mobil)');
+      return;
+    }
     if (!this.missions.active && !this.missions.sideJob && this.missions.index < MISSIONS.length) {
       const home = this.city.locations.home;
-      if (dist2D(this.player.x, this.player.z, home.x, home.z) < 12) { this.hud.setPrompt(`E — Mulai misi: ${MISSIONS[this.missions.index].title}`); return; }
+      if (dist2D(this.player.x, this.player.z, home.x, home.z) < 12) {
+        this.hud.setPrompt(`E — Mulai misi: ${MISSIONS[this.missions.index].title}`);
+        return;
+      }
     }
     if (!this.missions.active && !this.missions.sideJob) {
       const taxi = this.city.locations.taxiStand;
-      if (dist2D(this.player.x, this.player.z, taxi.x, taxi.z) < 8) { this.hud.setPrompt('E — Kerja taksi'); return; }
+      if (dist2D(this.player.x, this.player.z, taxi.x, taxi.z) < 8) {
+        this.hud.setPrompt('E — Kerja taksi');
+        return;
+      }
       const race = this.city.locations.raceStart;
-      if (dist2D(this.player.x, this.player.z, race.x, race.z) < 8) { this.hud.setPrompt('E — Balap liar'); return; }
+      if (dist2D(this.player.x, this.player.z, race.x, race.z) < 8) {
+        this.hud.setPrompt('E — Balap liar');
+        return;
+      }
+      const market = this.city.locations.market;
+      if (dist2D(this.player.x, this.player.z, market.x, market.z) < 8) {
+        this.hud.setPrompt('E — Kerja kurir');
+        return;
+      }
     }
     this.hud.setPrompt(null);
   }
 
-  // ---- Render ----
+  // ---- Render ------------------------------------------------------------
+
   render() {
     const w = this.canvas.clientWidth || 1280;
     const h = this.canvas.clientHeight || 720;
@@ -758,21 +870,20 @@ export class Game {
     const dt = 1 / 60;
 
     // Camera.
-    let camTarget, camPos;
-    if (this.shotMode === 'map') {
-      // High view over the city for the map screen backdrop.
+    let camTarget;
+    let camPos;
+    if (this.shotMode === 'map' || this.shotMode === 'city') {
+      // High view over the city for the map screen backdrop / postcard.
       camPos = [150, 130, 400];
       camTarget = [0, 0, 60];
-    } else if (this.shotMode === 'city') {
-      camPos = [180, 150, 420];
-      camTarget = [0, 0, 40];
     } else if (this.state === 'title') {
       // Slow orbit around the city, looking south so the sea sits behind it.
       const t = this.time * 0.05;
       camPos = [Math.sin(t) * 200, 45, -280 + Math.cos(t) * 30];
       camTarget = [0, 14, 40];
     } else {
-      const px = this.player.x, pz = this.player.z;
+      const px = this.player.x;
+      const pz = this.player.z;
       const dist = this.playerCar ? 14 : 10;
       const height = this.playerCar ? 5.5 : 4.2;
       // The camera looks along the direction of travel, from behind the
@@ -781,12 +892,14 @@ export class Game {
       // showed the road the car had already left, and everything staged
       // "ahead" of it sat behind the camera.)
       const yaw = this.playerCar ? this.player.heading : this.camera.yaw;
-      const fx = Math.sin(yaw), fz = Math.cos(yaw);
-      const tx = px, tz = pz;
-      camPos = [tx - fx * dist, height, tz - fz * dist];
-      camTarget = [tx + fx * 4, 2, tz + fz * 4];
+      const fx = Math.sin(yaw);
+      const fz = Math.cos(yaw);
+      camPos = [px - fx * dist, height, pz - fz * dist];
+      camTarget = [px + fx * 4, 2, pz + fz * 4];
       // Keep the camera out of buildings: lift it if inside a collider.
-      const hit = this.city.colliders.find((c) => camPos[0] > c.x0 && camPos[0] < c.x1 && camPos[2] > c.z0 && camPos[2] < c.z1 && height < c.h);
+      const hit = this.city.colliders.find(
+        (c) => camPos[0] > c.x0 && camPos[0] < c.x1 && camPos[2] > c.z0 && camPos[2] < c.z1 && height < c.h,
+      );
       if (hit) camPos[1] = hit.h + 3;
     }
     this.camPos = camPos;
@@ -807,8 +920,10 @@ export class Game {
       const pulse = 1 + smoothstep(0, 1, (Math.sin(this.time * 4) + 1) / 2) * 0.15;
       r.box(marker.x, 4.2 + bob, marker.z, 1.0 * pulse, 1.0 * pulse, 1.0 * pulse, Math.PI / 4, this.time * 1.5, 0, [1.0, 0.85, 0.2], 2);
       r.box(marker.x, 0.25, marker.z, 3.2, 0.5, 3.2, 0, 0, 0, [1.0, 0.85, 0.2], 2);
-      const px = this.player.x, pz = this.player.z;
-      const dx = marker.x - px, dz = marker.z - pz;
+      const px = this.player.x;
+      const pz = this.player.z;
+      const dx = marker.x - px;
+      const dz = marker.z - pz;
       const dist = Math.hypot(dx, dz);
       if (dist > 14) {
         const steps = Math.min(24, Math.floor(dist / 7));

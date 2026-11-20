@@ -2,6 +2,9 @@
 // No libraries. One shader, vertex-lit coloured boxes: the whole city is a
 // single static mesh, and everything that moves (player, cars, peds, heli)
 // is drawn as boxes pushed into a dynamic buffer each frame.
+//
+// Vertex layout: 10 floats — position (3), normal (3), colour (3), misc (1).
+// misc: 0 = normal, 1 = water (shimmers), 2 = emissive (no shading, no fog).
 
 import { mat4Compose, mat4Point, mat4Dir, mat4Transpose } from './math.js';
 
@@ -46,13 +49,13 @@ varying vec3 vWorld;
 void main() {
   vec3 c = vColor;
   if (vMisc > 1.5) {
-    // Emissive (sun, clouds, lamps): no shading, no fog.
+    // Emissive (sun, clouds, lamps, headlights): no shading, no fog.
     gl_FragColor = vec4(c, 1.0);
     return;
   }
   float light = vLight;
   if (vMisc > 0.5) {
-    // Water: gentle shimmer so the harbour feels alive.
+    // Water: a gentle shimmer so the harbour feels alive.
     light *= 0.92 + 0.10 * sin(vWorld.x * 0.35 + uTime * 1.4) * sin(vWorld.z * 0.30 - uTime * 1.1);
   }
   c *= light;
@@ -62,7 +65,9 @@ void main() {
 }
 `;
 
-// Unit-box faces: [normal, 4 corners] with a consistent winding.
+// Unit-box faces: [normal, 4 corners], wound consistently so back-face
+// culling never eats a wall. The top face comes first, then bottom, then
+// the four sides.
 const FACES = [
   { n: [0, 1, 0], c: [[-0.5, 0.5, -0.5], [0.5, 0.5, -0.5], [0.5, 0.5, 0.5], [-0.5, 0.5, 0.5]] },
   { n: [0, -1, 0], c: [[-0.5, -0.5, 0.5], [0.5, -0.5, 0.5], [0.5, -0.5, -0.5], [-0.5, -0.5, -0.5]] },
@@ -74,6 +79,37 @@ const FACES = [
 
 const VERTS_PER_BOX = 36;
 const FLOATS_PER_VERT = 10;
+// How many dynamic boxes one frame may hold: cars, peds, markers, statues
+// and the helicopter together never come close to this, but the cap keeps
+// a bug from growing the buffer without bound.
+const MAX_DYN_BOXES = 4096;
+const TRI_ORDER = [0, 1, 2, 0, 2, 3];
+// A quad is emitted double-sided (both windings) so the ground, roads and
+// water can never be culled by a wrong winding.
+const QUAD_ORDER = [0, 1, 2, 0, 2, 3, 0, 3, 2, 0, 2, 1];
+
+// Emit one transformed box into a flat float array, starting at `offset`.
+// Returns the new offset. Shared by the static MeshBuilder and the
+// renderer's dynamic buffer.
+function emitBox(data, offset, m, color, misc) {
+  for (const face of FACES) {
+    const n = mat4Dir(m, face.n);
+    for (const i of TRI_ORDER) {
+      const p = mat4Point(m, face.c[i]);
+      data[offset++] = p[0];
+      data[offset++] = p[1];
+      data[offset++] = p[2];
+      data[offset++] = n[0];
+      data[offset++] = n[1];
+      data[offset++] = n[2];
+      data[offset++] = color[0];
+      data[offset++] = color[1];
+      data[offset++] = color[2];
+      data[offset++] = misc;
+    }
+  }
+  return offset;
+}
 
 // Accumulates transformed box vertices into a plain array. Shared by the
 // static city mesh and the per-frame dynamic mesh.
@@ -81,41 +117,39 @@ export class MeshBuilder {
   constructor() {
     this.data = [];
   }
-  get vertexCount() { return this.data.length / FLOATS_PER_VERT; }
+
+  get vertexCount() {
+    return this.data.length / FLOATS_PER_VERT;
+  }
 
   // A box centred at (x, y, z) with size (sx, sy, sz), rotated by euler
   // angles (rx, ry, rz). Colour is [r, g, b] in 0..1. misc: 0 normal,
   // 1 water, 2 emissive.
   box(x, y, z, sx, sy, sz, rx, ry, rz, color, misc = 0) {
     const m = mat4Compose(x, y, z, rx, ry, rz, sx, sy, sz);
-    for (const face of FACES) {
-      const n = mat4Dir(m, face.n);
-      const idx = [0, 1, 2, 0, 2, 3];
-      for (const i of idx) {
-        const p = mat4Point(m, face.c[i]);
-        this.data.push(p[0], p[1], p[2], n[0], n[1], n[2], color[0], color[1], color[2], misc);
-      }
-    }
+    const start = this.data.length;
+    this.data.length = start + VERTS_PER_BOX * FLOATS_PER_VERT;
+    emitBox(this.data, start, m, color, misc);
   }
 
-  // Flat quad (a ground tile) at height y, facing up. Corners given as
-  // [x, z] pairs in counter-clockwise order. Emitted double-sided so the
-  // winding can never cull the ground, roads or water.
+  // Flat quad (a ground tile) at height y, facing up. Corners are [x, z]
+  // pairs in counter-clockwise order.
   quad(corners, y, color, misc = 0) {
     const n = [0, 1, 0];
-    const idx = [0, 1, 2, 0, 2, 3, 0, 3, 2, 0, 2, 1];
-    for (const i of idx) {
+    for (const i of QUAD_ORDER) {
       const c = corners[i];
       this.data.push(c[0], y, c[1], n[0], n[1], n[2], color[0], color[1], color[2], misc);
     }
   }
 
-  toFloat32() { return new Float32Array(this.data); }
+  toFloat32() {
+    return new Float32Array(this.data);
+  }
 }
 
-// Lighting presets. The sun direction, fog colour, sky colour, ambient
-// floor and fog range are fixed per preset, so a golden-hour or night shot
-// is the same every run: no time-of-day randomness, only a chosen preset.
+// Lighting presets. Sun direction, fog colour, sky colour, ambient floor
+// and fog range are fixed per preset, so a golden-hour or night shot is
+// the same every run: no time-of-day randomness, only a chosen preset.
 export const LIGHTING_PRESETS = {
   // Bright midday, the default for normal play.
   day: { sun: [0.55, 0.85, 0.35], fog: [0.72, 0.84, 0.92], clear: [0.45, 0.72, 0.92], ambient: 0.62, fogRange: [320, 1100] },
@@ -136,36 +170,43 @@ function compile(gl, type, src) {
   return sh;
 }
 
+function linkProgram(gl, vertSrc, fragSrc) {
+  const prog = gl.createProgram();
+  gl.attachShader(prog, compile(gl, gl.VERTEX_SHADER, vertSrc));
+  gl.attachShader(prog, compile(gl, gl.FRAGMENT_SHADER, fragSrc));
+  gl.linkProgram(prog);
+  if (!gl.getProgramParameter(prog, gl.LINK_STATUS)) {
+    throw new Error('shader link: ' + gl.getProgramInfoLog(prog));
+  }
+  return prog;
+}
+
 export class Renderer {
   constructor(canvas) {
     this.canvas = canvas;
-    const gl = canvas.getContext('webgl2', { antialias: true }) || canvas.getContext('webgl', { antialias: true });
+    const gl = canvas.getContext('webgl2', { antialias: true })
+      || canvas.getContext('webgl', { antialias: true });
     if (!gl) throw new Error('WebGL is not available in this browser');
     this.gl = gl;
-    const prog = gl.createProgram();
-    gl.attachShader(prog, compile(gl, gl.VERTEX_SHADER, VERT));
-    gl.attachShader(prog, compile(gl, gl.FRAGMENT_SHADER, FRAG));
-    gl.linkProgram(prog);
-    if (!gl.getProgramParameter(prog, gl.LINK_STATUS)) {
-      throw new Error('shader link: ' + gl.getProgramInfoLog(prog));
-    }
-    this.prog = prog;
-    this.uProj = gl.getUniformLocation(prog, 'uProj');
-    this.uView = gl.getUniformLocation(prog, 'uView');
-    this.uSun = gl.getUniformLocation(prog, 'uSun');
-    this.uTime = gl.getUniformLocation(prog, 'uTime');
-    this.uAmbient = gl.getUniformLocation(prog, 'uAmbient');
-    this.uFogColor = gl.getUniformLocation(prog, 'uFogColor');
-    this.uFogRange = gl.getUniformLocation(prog, 'uFogRange');
-    gl.useProgram(prog);
+    this.prog = linkProgram(gl, VERT, FRAG);
+    this.uProj = gl.getUniformLocation(this.prog, 'uProj');
+    this.uView = gl.getUniformLocation(this.prog, 'uView');
+    this.uSun = gl.getUniformLocation(this.prog, 'uSun');
+    this.uTime = gl.getUniformLocation(this.prog, 'uTime');
+    this.uAmbient = gl.getUniformLocation(this.prog, 'uAmbient');
+    this.uFogColor = gl.getUniformLocation(this.prog, 'uFogColor');
+    this.uFogRange = gl.getUniformLocation(this.prog, 'uFogRange');
+    gl.useProgram(this.prog);
     this.lighting = 'day';
-    this.setLighting('day');
+    this._preset = LIGHTING_PRESETS.day;
     gl.enable(gl.DEPTH_TEST);
     gl.enable(gl.CULL_FACE);
     gl.cullFace(gl.BACK);
     this.staticCount = 0;
     this.staticBuf = null;
-    this.dyn = new Float32Array(FLOATS_PER_VERT * VERTS_PER_BOX * 4096);
+    // Room for MAX_DYN_BOXES dynamic boxes per frame — far more than the
+    // city ever draws at once (cars, peds, markers, statues, helicopter).
+    this.dyn = new Float32Array(FLOATS_PER_VERT * VERTS_PER_BOX * MAX_DYN_BOXES);
     this.dynCount = 0;
     this.dynBuf = gl.createBuffer();
     this.time = 0;
@@ -174,9 +215,9 @@ export class Renderer {
   // Switch the lighting preset ('day', 'golden' or 'night'). The uniforms
   // are applied in begin(), so a preset change takes effect next frame.
   setLighting(name) {
-    const p = LIGHTING_PRESETS[name] ?? LIGHTING_PRESETS.day;
-    this.lighting = LIGHTING_PRESETS[name] ? name : 'day';
-    this._preset = p;
+    const known = Object.prototype.hasOwnProperty.call(LIGHTING_PRESETS, name);
+    this.lighting = known ? name : 'day';
+    this._preset = LIGHTING_PRESETS[this.lighting];
   }
 
   resize(w, h) {
@@ -195,6 +236,12 @@ export class Renderer {
     this.staticBuf = gl.createBuffer();
     gl.bindBuffer(gl.ARRAY_BUFFER, this.staticBuf);
     gl.bufferData(gl.ARRAY_BUFFER, arr, gl.STATIC_DRAW);
+  }
+
+  // How much the renderer is drawing this frame: static city vertices,
+  // dynamic boxes, and elapsed time. Handy when a scene feels slow.
+  getStats() {
+    return { staticVerts: this.staticCount, dynBoxes: this.dynCount / VERTS_PER_BOX, time: this.time };
   }
 
   _bind(buf, count) {
@@ -233,21 +280,12 @@ export class Renderer {
   }
 
   // Push one box into the dynamic buffer (same signature as MeshBuilder.box).
+  // Silently drops the box when the buffer is full, rather than crashing.
   box(x, y, z, sx, sy, sz, rx, ry, rz, color, misc = 0) {
     const m = mat4Compose(x, y, z, rx, ry, rz, sx, sy, sz);
-    let o = this.dynCount * FLOATS_PER_VERT;
-    if (o + VERTS_PER_BOX * FLOATS_PER_VERT > this.dyn.length) return;
-    for (const face of FACES) {
-      const n = mat4Dir(m, face.n);
-      const idx = [0, 1, 2, 0, 2, 3];
-      for (const i of idx) {
-        const p = mat4Point(m, face.c[i]);
-        this.dyn[o++] = p[0]; this.dyn[o++] = p[1]; this.dyn[o++] = p[2];
-        this.dyn[o++] = n[0]; this.dyn[o++] = n[1]; this.dyn[o++] = n[2];
-        this.dyn[o++] = color[0]; this.dyn[o++] = color[1]; this.dyn[o++] = color[2];
-        this.dyn[o++] = misc;
-      }
-    }
+    const offset = this.dynCount * FLOATS_PER_VERT;
+    if (offset + VERTS_PER_BOX * FLOATS_PER_VERT > this.dyn.length) return;
+    emitBox(this.dyn, offset, m, color, misc);
     this.dynCount += VERTS_PER_BOX;
   }
 

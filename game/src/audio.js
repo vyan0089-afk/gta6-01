@@ -1,41 +1,53 @@
-// audio.js — all sound is synthesised with WebAudio. No audio files, no
-// network. Engine hum, sirens, gunshots, pickups, and three radio stations
-// with their own little melodies and track names.
+// audio.js — every sound in Tanjung Matahari is synthesised with WebAudio.
+// No audio files, no network: engine hum, sirens, gunshots, pickup blips,
+// and four radio stations, each with its own little melody and track list.
+//
+// The radio works like a step sequencer: every frame, update() schedules
+// the next notes a quarter of a second ahead, so the music never stutters
+// even when the frame rate wobbles.
 
 const STATIONS = [
   {
     id: 'matahari',
     name: 'Radio Matahari',
     genre: 'Dangdut Pantai',
-    tracks: ['Ombak Rindu — Siti Tanjung', 'Goyang Pasar — Dangdut 88', 'Senja di Pelabuhan — Raka Band'],
-    // A bouncy pentatonic line.
+    tracks: ['Ombak Rindu — Siti Tanjung', 'Goyang Pasar — Dangdut 88', 'Senja di Pelabuhan — Raka Band', 'Pantun Cinta — Siti Tanjung'],
+    // A bouncy pentatonic line, the sound of the night market.
     notes: [0, 3, 5, 7, 10, 7, 5, 3, 0, 3, 5, 7, 12, 10, 7, 5],
-    bpm: 132, wave: 'sawtooth', base: 220,
+    bpm: 132,
+    wave: 'sawtooth',
+    base: 220,
   },
   {
     id: 'pantai',
     name: 'Pantai FM',
     genre: 'Reggae Santai',
-    tracks: ['Angin Laut — The Breezers', 'Santai Sore — Kelapa Band', 'Jalan Pelan — Ombak Band'],
+    tracks: ['Angin Laut — The Breezers', 'Santai Sore — Kelapa Band', 'Jalan Pelan — Ombak Band', 'Ombak Tenang — Kelapa Band'],
     notes: [0, 0, 7, 0, 5, 0, 3, 0, 0, 7, 10, 7, 5, 3, 0, 0],
-    bpm: 96, wave: 'triangle', base: 196,
+    bpm: 96,
+    wave: 'triangle',
+    base: 196,
   },
   {
     id: 'kota',
     name: 'Kota FM',
     genre: 'Rock Tanjung',
-    tracks: ['Gaspol — Motor Band', 'Malam Panas — Jalanan', 'Bintang Lima — Raka & Co'],
+    tracks: ['Gaspol — Motor Band', 'Malam Panas — Jalanan', 'Bintang Lima — Raka & Co', 'Jalanan Panas — Motor Band'],
     notes: [0, 0, 12, 0, 10, 0, 7, 0, 5, 7, 10, 12, 10, 7, 5, 3],
-    bpm: 150, wave: 'square', base: 165,
+    bpm: 150,
+    wave: 'square',
+    base: 165,
   },
   {
     id: 'senja',
     name: 'Senja FM',
     genre: 'Dangdut Senja',
-    tracks: ['Senja di Tanjung — Siti Tanjung', 'Ombak Pelan — Dangdut 88', 'Lampu Pasar — Raka Band'],
+    tracks: ['Senja di Tanjung — Siti Tanjung', 'Ombak Pelan — Dangdut 88', 'Lampu Pasar — Raka Band', 'Senja Terakhir — Dangdut 88'],
     // Slow, swaying line for the golden hour: long notes, low base.
     notes: [0, 7, 0, 5, 0, 3, 0, 0, 0, 7, 0, 10, 7, 5, 3, 0],
-    bpm: 104, wave: 'sine', base: 185,
+    bpm: 104,
+    wave: 'sine',
+    base: 185,
   },
 ];
 
@@ -52,10 +64,13 @@ export class AudioSys {
     this.nextNoteTime = 0;
     this.sirenOsc = null;
     this.sirenGain = null;
+    this.sirenLfo = null;
     this.sirenOn = false;
     this.muted = false;
   }
 
+  // Create the audio graph on the first user gesture (browsers block audio
+  // before that). Safe to call repeatedly; later calls just resume.
   ensure() {
     if (this.ctx) {
       if (this.ctx.state === 'suspended') this.ctx.resume();
@@ -70,6 +85,8 @@ export class AudioSys {
     this.radioGain = this.ctx.createGain();
     this.radioGain.gain.value = 0.16;
     this.radioGain.connect(this.master);
+    // The engine is one always-running sawtooth whose pitch and volume
+    // follow the car's speed; silence is just gain 0.
     this.engineOsc = this.ctx.createOscillator();
     this.engineOsc.type = 'sawtooth';
     this.engineOsc.frequency.value = 55;
@@ -93,6 +110,7 @@ export class AudioSys {
     this.engineOsc.frequency.setTargetAtTime(50 + speed01 * 130, t, 0.08);
   }
 
+  // The police siren is a sine whose pitch wobbles up and down on an LFO.
   setSiren(on) {
     if (!this.ctx) return;
     if (on === this.sirenOn) return;
@@ -113,14 +131,21 @@ export class AudioSys {
       this.sirenGain.connect(this.master);
       this.sirenOsc.start();
       lfo.start();
-      this._sirenLfo = lfo;
+      this.sirenLfo = lfo;
     } else if (this.sirenOsc) {
-      try { this.sirenOsc.stop(); this._sirenLfo.stop(); } catch (e) { /* already stopped */ }
+      try {
+        this.sirenOsc.stop();
+        if (this.sirenLfo) this.sirenLfo.stop();
+      } catch (e) {
+        // Already stopped.
+      }
       this.sirenOsc = null;
       this.sirenGain = null;
+      this.sirenLfo = null;
     }
   }
 
+  // A short decaying tone: pickups, UI clicks, punches.
   blip(freq = 880, dur = 0.12, type = 'sine', vol = 0.2) {
     if (!this.ctx) return;
     const t = this.ctx.currentTime;
@@ -136,6 +161,7 @@ export class AudioSys {
     o.stop(t + dur);
   }
 
+  // A gunshot is a burst of filtered noise, not a tone.
   gunshot() {
     if (!this.ctx) return;
     const t = this.ctx.currentTime;
@@ -156,7 +182,31 @@ export class AudioSys {
     src.start(t);
   }
 
-  thud() { this.blip(120, 0.15, 'sine', 0.3); }
+  thud() {
+    this.blip(120, 0.15, 'sine', 0.3);
+  }
+
+  // A two-note pickup chirp for crates and statues.
+  pickup() {
+    this.blip(1200, 0.12, 'sine', 0.2);
+    setTimeout(() => this.blip(1600, 0.12, 'sine', 0.2), 80);
+  }
+
+  // A little rising fanfare for a finished mission: four notes, one after
+  // the other, each a touch higher than the last.
+  missionJingle() {
+    if (!this.ctx) return;
+    const notes = [523, 659, 784, 1047];
+    notes.forEach((freq, i) => {
+      setTimeout(() => this.blip(freq, 0.22, 'triangle', 0.25), i * 110);
+    });
+  }
+
+  // A two-note chirp when the radio station changes.
+  stationJingle() {
+    this.blip(660, 0.08, 'sine', 0.15);
+    setTimeout(() => this.blip(880, 0.08, 'sine', 0.15), 90);
+  }
 
   nextStation() {
     this.station = (this.station + 1) % STATIONS.length;
@@ -166,7 +216,11 @@ export class AudioSys {
 
   currentStation() {
     const s = STATIONS[this.station];
-    return { name: s.name, genre: s.genre, track: s.tracks[this.step % s.tracks.length] };
+    return {
+      name: s.name,
+      genre: s.genre,
+      track: s.tracks[this.step % s.tracks.length],
+    };
   }
 
   toggleRadio() {
@@ -174,13 +228,16 @@ export class AudioSys {
     return this.radioOn;
   }
 
-  // Call every frame; schedules the next radio notes.
+  // Call every frame; schedules the next radio notes a little ahead of
+  // the playhead so the melody keeps flowing.
   update() {
     if (!this.ctx || !this.radioOn || this.muted) return;
     const s = STATIONS[this.station];
     const beat = 60 / s.bpm / 2;
     while (this.nextNoteTime < this.ctx.currentTime + 0.25) {
       const note = s.notes[this.step % s.notes.length];
+      // A 0 is a rest, except on the downbeat, where a soft root note
+      // keeps the pulse.
       if (note !== 0 || this.step % 4 === 0) {
         const freq = s.base * Math.pow(2, note / 12);
         const o = this.ctx.createOscillator();

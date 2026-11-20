@@ -1,7 +1,8 @@
-// hud.js — the whole interface: health/armour/money, wanted stars, objective
-// text, live canvas minimap, speed, radio, dispatch feed, weapon wheel and
-// the title / pause / garage / game-over menus. All DOM, drawn over the
-// WebGL canvas.
+// hud.js — the whole interface: health/armour/money, wanted stars,
+// objective text, the live canvas minimap, speed, radio, dispatch feed,
+// weapon wheel, and the title / pause / garage / game-over / map menus.
+// All DOM, drawn over the WebGL canvas. The minimap and the big map on
+// the map screen share one drawing routine, so both always agree.
 
 export const RESPECT_RANKS = [
   { at: 0, name: 'Anak Baru' },
@@ -22,6 +23,15 @@ const WEAPONS = [
   { id: 'shotgun', name: 'Senapan', key: '3' },
 ];
 
+// Every element id the HUD code touches, so build() can wire them all up
+// in one loop instead of one querySelector per element.
+const HUD_IDS = [
+  'hp', 'armour', 'hpNum', 'armourNum', 'money', 'respect', 'wanted', 'wantedLabel', 'clock',
+  'stageLine', 'objText', 'objCounter', 'objTimer', 'feed', 'policeInfo',
+  'prompt', 'dialogue', 'banner', 'bannerTitle', 'bannerSub', 'speed',
+  'speedNum', 'carName', 'carCond', 'radio', 'wheel', 'menu', 'vignette',
+];
+
 export class Hud {
   constructor() {
     this.root = document.getElementById('hud');
@@ -40,6 +50,7 @@ export class Hud {
         <div id="respect">Anak Baru</div>
       </div>
       <div id="wanted"></div>
+      <div id="wantedLabel"></div>
       <div id="clock"></div>
       <div id="objective"><div id="stageLine"></div><div id="objText"></div><div id="objCounter"></div><div id="objTimer"></div></div>
       <div id="feed"></div>
@@ -54,10 +65,12 @@ export class Hud {
       <div id="menu"></div>
     `;
     this.el = {};
-    for (const id of ['hp', 'armour', 'hpNum', 'armourNum', 'money', 'respect', 'wanted', 'clock', 'stageLine', 'objText', 'objCounter', 'objTimer', 'feed', 'policeInfo', 'prompt', 'dialogue', 'banner', 'bannerTitle', 'bannerSub', 'speed', 'speedNum', 'carName', 'carCond', 'radio', 'wheel', 'menu', 'vignette']) {
+    for (const id of HUD_IDS) {
       this.el[id] = this.root.querySelector('#' + id);
     }
   }
+
+  // ---- Live HUD ---------------------------------------------------------
 
   setStatus({ health, armour, money, respect }) {
     this.el.hp.style.width = Math.max(0, health) + '%';
@@ -95,13 +108,24 @@ export class Hud {
       this.el.policeInfo.innerHTML = '';
       return;
     }
-    this.el.policeInfo.innerHTML = units.map((u) => `<div class="policeLine">${u.name} · ${u.dist} m</div>`).join('');
+    this.el.policeInfo.innerHTML = units
+      .map((u) => `<div class="policeLine">${u.name} · ${u.dist} m</div>`)
+      .join('');
   }
 
   setWanted(n) {
     let stars = '';
-    for (let i = 0; i < 5; i++) stars += `<span class="star ${i < n ? 'on' : ''}">★</span>`;
+    for (let i = 0; i < 5; i++) {
+      stars += `<span class="star ${i < n ? 'on' : ''}">★</span>`;
+    }
     this.el.wanted.innerHTML = stars;
+  }
+
+  // The plain-language label under the stars ("Dicari Polisi", ...).
+  // Empty when the player is clean.
+  setWantedLabel(text) {
+    this.el.wantedLabel.textContent = text ?? '';
+    this.el.wantedLabel.style.display = text ? 'block' : 'none';
   }
 
   setObjective(text, timer = null) {
@@ -144,13 +168,24 @@ export class Hud {
     setTimeout(() => this.el.vignette.classList.remove('hit'), 180);
   }
 
-  showWheel(selected) {
-    this.el.wheel.innerHTML = WEAPONS.map((w) => `<div class="wslot ${w.id === selected ? 'sel' : ''}"><b>${w.key}</b> ${w.name}</div>`).join('');
+  // The weapon wheel shows the three weapons and, for the guns, how much
+  // ammo is left — so the player can see at a glance whether the shotgun
+  // is worth switching to.
+  showWheel(selected, ammo = {}) {
+    this.el.wheel.innerHTML = WEAPONS.map((w) => {
+      const count = w.id === 'pistol' ? (ammo.pistol ?? '') : w.id === 'shotgun' ? (ammo.shotgun ?? '') : '';
+      const suffix = count === '' ? '' : ` <span>(${count})</span>`;
+      return `<div class="wslot ${w.id === selected ? 'sel' : ''}"><b>${w.key}</b> ${w.name}${suffix}</div>`;
+    }).join('');
     this.el.wheel.style.display = 'flex';
   }
-  hideWheel() { this.el.wheel.style.display = 'none'; }
 
-  // ---- Minimap ----
+  hideWheel() {
+    this.el.wheel.style.display = 'none';
+  }
+
+  // ---- Minimap ----------------------------------------------------------
+
   drawMinimap(state) {
     this.drawMapInto(this.mm, 220, state);
   }
@@ -163,10 +198,9 @@ export class Hud {
     c.clearRect(0, 0, S, S);
     c.fillStyle = 'rgba(10, 30, 25, 0.85)';
     c.fillRect(0, 0, S, S);
-    // Sea.
+    // Sea and beach along the south edge.
     c.fillStyle = '#1a6f7d';
     c.fillRect(0, (318 + half) / 600 * S, S, S);
-    // Beach.
     c.fillStyle = '#c9b98a';
     c.fillRect(0, (258 + half) / 600 * S, S, ((318 - 258) / 600) * S);
     // Roads.
@@ -174,9 +208,15 @@ export class Hud {
     c.lineWidth = 2;
     for (const rc of state.roads) {
       const [x1] = toMap(rc, 0);
-      c.beginPath(); c.moveTo(x1, 0); c.lineTo(x1, S); c.stroke();
+      c.beginPath();
+      c.moveTo(x1, 0);
+      c.lineTo(x1, S);
+      c.stroke();
       const [, z1] = toMap(0, rc);
-      c.beginPath(); c.moveTo(0, z1); c.lineTo(S, z1); c.stroke();
+      c.beginPath();
+      c.moveTo(0, z1);
+      c.lineTo(S, z1);
+      c.stroke();
     }
     // Buildings.
     c.fillStyle = '#5a5a62';
@@ -185,36 +225,44 @@ export class Hud {
       const [x2, z2] = toMap(b.x1, b.z1);
       c.fillRect(x, z, Math.max(1, x2 - x), Math.max(1, z2 - z));
     }
-    // Mission marker (pulsing yellow).
+    // Mission marker: a pulsing yellow dot with an exclamation mark.
     if (state.marker) {
       const [x, z] = toMap(state.marker.x, state.marker.z);
       const r = 7 + Math.sin(state.time * 5) * 2;
       c.fillStyle = '#ffd23f';
-      c.beginPath(); c.arc(x, z, r, 0, Math.PI * 2); c.fill();
+      c.beginPath();
+      c.arc(x, z, r, 0, Math.PI * 2);
+      c.fill();
       c.fillStyle = '#000';
       c.font = 'bold 10px sans-serif';
       c.textAlign = 'center';
       c.fillText('!', x, z + 3.5);
     }
-    // Police (red dots), traffic (white dots).
+    // Police (red dots) and traffic (white squares).
     for (const p of state.police) {
       const [x, z] = toMap(p.x, p.z);
       c.fillStyle = '#ff3b30';
-      c.beginPath(); c.arc(x, z, 3, 0, Math.PI * 2); c.fill();
+      c.beginPath();
+      c.arc(x, z, 3, 0, Math.PI * 2);
+      c.fill();
     }
     for (const t of state.traffic) {
       const [x, z] = toMap(t.x, t.z);
       c.fillStyle = 'rgba(255,255,255,0.8)';
       c.fillRect(x - 1.5, z - 1.5, 3, 3);
     }
-    // Player arrow (rotates with heading).
+    // Player arrow, rotated to the heading.
     const [px, pz] = toMap(state.player.x, state.player.z);
     c.save();
     c.translate(px, pz);
     c.rotate(state.player.heading);
     c.fillStyle = '#fff';
     c.beginPath();
-    c.moveTo(0, -7); c.lineTo(5, 5); c.lineTo(0, 2.5); c.lineTo(-5, 5); c.closePath();
+    c.moveTo(0, -7);
+    c.lineTo(5, 5);
+    c.lineTo(0, 2.5);
+    c.lineTo(-5, 5);
+    c.closePath();
     c.fill();
     c.restore();
     // North arrow.
@@ -224,14 +272,23 @@ export class Hud {
     c.fillText('N ↑', 8, 16);
   }
 
-  // ---- Menus ----
+  // ---- Menus ------------------------------------------------------------
+
   showMenu(html) {
     this.el.menu.innerHTML = html;
     this.el.menu.style.display = 'flex';
   }
+
   hideMenu() {
     this.el.menu.innerHTML = '';
     this.el.menu.style.display = 'none';
+  }
+
+  // Wire every button in the current menu to the callback by its data-a.
+  _wire(cb) {
+    this.el.menu.querySelectorAll('button').forEach((b) => {
+      b.addEventListener('click', () => cb(b.dataset.a));
+    });
   }
 
   showTitle(hasSave, cb) {
@@ -247,9 +304,7 @@ export class Hud {
         </div>
         <div class="foot">Game orisinal karya tim Tanjung Matahari · dibuat untuk make.fun gta6-01</div>
       </div>`);
-    this.el.menu.querySelectorAll('button').forEach((b) => {
-      b.addEventListener('click', () => cb(b.dataset.a));
-    });
+    this._wire(cb);
   }
 
   showHow(cb) {
@@ -261,12 +316,14 @@ export class Hud {
           <p><b>E</b> — masuk/keluar mobil, ambil peti, mulai kerja &nbsp;·&nbsp; <b>Shift</b> — lari</p>
           <p><b>F</b> — pukul &nbsp;·&nbsp; <b>Klik kiri</b> — tembak &nbsp;·&nbsp; <b>Q (tahan)</b> — roda senjata, <b>1/2/3</b> — ganti senjata</p>
           <p><b>R</b> — ganti stasiun radio &nbsp;·&nbsp; <b>Spasi</b> — rem tangan &nbsp;·&nbsp; <b>Esc</b> — jeda &nbsp;·&nbsp; <b>M</b> — peta &amp; misi</p>
+          <p><b>H</b> — klakson (di dalam mobil) &nbsp;·&nbsp; <b>E</b> di Pasar Malam — kerja kurir &nbsp;·&nbsp; <b>E</b> di Pangkalan Taksi — kerja taksi &nbsp;·&nbsp; <b>E</b> di garis start pantai — balap liar</p>
+          <p>Layar peta (M) menunjukkan misi, pangkat, patung yang terkumpul, dan statistik kariermu.</p>
           <p>Curi mobil, kerjakan 8 misi cerita Raka, naikkan respect, dan hindari polisi. Bintang 4 ke atas: helikopter ikut mengejar. Bintang 5: blokade jalan.</p>
           <p>Simpan otomatis setiap misi selesai. Uang dipakai untuk upgrade mobil di Bengkel Tanjung.</p>
         </div>
         <div class="btns"><button data-a="back">Kembali</button></div>
       </div>`);
-    this.el.menu.querySelectorAll('button').forEach((b) => b.addEventListener('click', () => cb(b.dataset.a)));
+    this._wire(cb);
   }
 
   showSettings(settings, cb) {
@@ -286,7 +343,7 @@ export class Hud {
     vol.addEventListener('input', () => cb('volume', vol.value / 100));
     sens.addEventListener('input', () => cb('sensitivity', sens.value / 100));
     mus.addEventListener('change', () => cb('music', mus.checked));
-    this.el.menu.querySelectorAll('button').forEach((b) => b.addEventListener('click', () => cb(b.dataset.a)));
+    this._wire(cb);
   }
 
   showPause(cb) {
@@ -301,7 +358,7 @@ export class Hud {
           <button data-a="quit">Keluar ke Menu Utama</button>
         </div>
       </div>`);
-    this.el.menu.querySelectorAll('button').forEach((b) => b.addEventListener('click', () => cb(b.dataset.a)));
+    this._wire(cb);
   }
 
   // The map screen (M): a big map of Tanjung, the 8 story missions with
@@ -312,25 +369,35 @@ export class Hud {
     const mark = (s) => (s === 'done' ? '✓ SELESAI' : s === 'current' ? '► BERJALAN' : '· TERKUNCI');
     const slotLine = (s) => {
       if (s.empty) return `Slot ${s.slot} — Kosong`;
-      const when = s.savedAt ? new Date(s.savedAt).toLocaleString('id-ID', { day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit' }) : '';
+      const when = s.savedAt
+        ? new Date(s.savedAt).toLocaleString('id-ID', { day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit' })
+        : '';
       return `Slot ${s.slot} — Misi ${s.missionIndex + 1}/8 · $${Math.floor(s.money)} · ${s.missionsDone} misi selesai · ${when}`;
     };
+    const doneCount = data.missions.filter((m) => m.state === 'done').length;
     this.showMenu(`
       <div class="panel mapPanel">
         <h2>PETA TANJUNG MATAHARI</h2>
         <div class="mapClock">${data.clock ?? ''}</div>
         <div class="mapGrid">
           <div class="mapCol">
-            <canvas id="bigmap" width="300" height="300"></canvas>
+            <canvas id="bigmap" width="260" height="260"></canvas>
           </div>
           <div class="mapCol">
-            <div class="mapSec"><h3>Misi Cerita — ${data.missions.filter((m) => m.state === 'done').length}/8 selesai</h3>
+            <div class="mapSec"><h3>Misi Cerita — ${doneCount}/8 selesai</h3>
               ${data.missions.map((m) => `<div class="mapRow"><span>${m.chapter} — ${m.title}</span><b>${mark(m.state)}</b></div>`).join('')}
+              ${data.nextMission ? `<div class="mapRow"><span>Berikutnya</span><b>${data.nextMission.title}</b></div>` : ''}
             </div>
             <div class="mapSec"><h3>Karier Raka</h3>
               <div class="mapRow"><span>Uang</span><b>$${Math.floor(data.money)}</b></div>
               <div class="mapRow"><span>Pangkat</span><b>${respectRank(data.respect)} (${data.respect} respect)</b></div>
               <div class="mapRow"><span>Patung Tanjung</span><b>${data.statuesTaken}/${data.statuesTotal} terkumpul</b></div>
+            </div>
+            <div class="mapSec"><h3>Statistik</h3>
+              <div class="mapRow"><span>Mobil dicuri</span><b>${data.stats?.carsStolen ?? 0}</b></div>
+              <div class="mapRow"><span>Tembakan dilepas</span><b>${data.stats?.shotsFired ?? 0}</b></div>
+              <div class="mapRow"><span>Jarak berkendara</span><b>${Math.round((data.stats?.distanceDriven ?? 0) / 1000 * 10) / 10} km</b></div>
+              <div class="mapRow"><span>Musuh dikalahkan</span><b>${data.stats?.foesDown ?? 0}</b></div>
             </div>
             <div class="mapSec"><h3>Simpanan</h3>
               ${data.slots.map((s) => `<div class="mapRow"><span>${slotLine(s)}</span></div>`).join('')}
@@ -344,8 +411,8 @@ export class Hud {
         </div>
       </div>`);
     const big = this.el.menu.querySelector('#bigmap');
-    if (big && data.mapState) this.drawMapInto(big.getContext('2d'), 300, data.mapState);
-    this.el.menu.querySelectorAll('button').forEach((b) => b.addEventListener('click', () => cb(b.dataset.a)));
+    if (big && data.mapState) this.drawMapInto(big.getContext('2d'), 260, data.mapState);
+    this._wire(cb);
   }
 
   showGarage(garage, money, cb) {
@@ -361,7 +428,7 @@ export class Hud {
         ${rows.map((r) => `<div class="shopRow"><b>${r.name}</b> — ${r.desc}<br>Level ${r.level}/${r.max} · Harga $${r.cost} ${r.level >= r.max ? '(MAX)' : `<button data-a="buy-${r.id}">Beli</button>`}</div>`).join('')}
         <div class="btns"><button data-a="close">Tutup Bengkel</button></div>
       </div>`);
-    this.el.menu.querySelectorAll('button').forEach((b) => b.addEventListener('click', () => cb(b.dataset.a)));
+    this._wire(cb);
   }
 
   showGameOver(reason, cb) {
@@ -371,7 +438,7 @@ export class Hud {
         <p>${reason === 'busted' ? 'Polisi menangkapmu. Denda $200, bintangmu hilang.' : 'Kamu kehabisan nyawa. Denda rumah sakit $200.'}</p>
         <div class="btns"><button data-a="respawn">Bangun Lagi</button></div>
       </div>`);
-    this.el.menu.querySelectorAll('button').forEach((b) => b.addEventListener('click', () => cb(b.dataset.a)));
+    this._wire(cb);
   }
 
   showComplete(cb) {
@@ -381,6 +448,6 @@ export class Hud {
         <p>Kamu menyelesaikan semua 8 misi cerita. Raka kini Legenda Tanjung. Kota ini milikmu — teruslah berkendara, kerjakan kerja sampingan, dan jaga namamu tetap besar.</p>
         <div class="btns"><button data-a="free">Terus Bermain</button></div>
       </div>`);
-    this.el.menu.querySelectorAll('button').forEach((b) => b.addEventListener('click', () => cb(b.dataset.a)));
+    this._wire(cb);
   }
 }

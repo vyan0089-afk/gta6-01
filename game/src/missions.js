@@ -1,19 +1,23 @@
-// missions.js — the story of Raka, driver of Tanjung Matahari. Eight staged
-// missions across three chapters, plus repeatable side jobs (taxi, delivery,
-// street race). Every stage has one clear objective shown on screen.
+// missions.js — the story of Raka, driver of Tanjung Matahari.
+//
+// Eight staged missions across three chapters, plus repeatable side jobs
+// (taxi, delivery, street race). Every stage has one clear objective shown
+// on screen, a counter when it counts things, and a spoken line from Raka
+// while it runs.
 
 import { dist2D } from './math.js';
 
 export const CHAPTERS = ['Bab 1 — Sopir Baru', 'Bab 2 — Nama di Jalanan', 'Bab 3 — Juragan Tanjung'];
 
 // Stage types:
-//  goto      {loc, radius}          walk/drive to a place
-//  steal     {model, loc}           get into the marked car
-//  deliver   {loc, radius, time?}   reach a place (optional timer)
-//  race      {points:[{x,z}], label} drive through checkpoints in order
-//  defeat    {loc, count, role}     defeat N hostiles at a place
-//  survive   {seconds}              stay alive / keep the wanted level
-//  escape    {loc, radius}          reach a place while wanted >= level
+//  goto      {loc, radius}            walk/drive to a place
+//  steal     {model, loc}             get into the marked car
+//  deliver   {loc, radius, time?}     reach a place (optional timer)
+//  race      {points:[{x,z}], time?}  drive through checkpoints in order
+//  collect   {loc, count}             pick up N crates with E
+//  defeat    {loc, count, role}       defeat N hostiles at a place
+//  survive   {seconds, wanted}        hold the wanted level for a time
+//  escape    {loc, radius, wanted}    reach a place while still wanted
 
 export const MISSIONS = [
   {
@@ -100,9 +104,23 @@ export const SIDE_JOBS = {
   race: { title: 'Balap Liar', briefing: 'Lima gerbang, waktu tercepat menang.', reward: 200 },
 };
 
+// Lines Raka mutters to himself while roaming free between missions.
+// The game rotates through them, one every dozen seconds, so the city
+// never feels silent even when no mission is running.
+export const FREE_ROAM_LINES = [
+  'Raka: Tanjung sore ini cantik. Sayang dompet masih tipis.',
+  'Raka: Gang Sanca pasti lagi ngintip dari gang sebelah.',
+  'Raka: Kalau ada kerjaan, taksi di Pangkalan Taksi selalu ada.',
+  'Raka: Bau sate dari Pasar Malam sampai ke sini. Lapar.',
+  'Raka: Panther GT emas itu masih nunggu di Vila Bukit.',
+  'Raka: Polisi lagi patroli. Jalan santai saja.',
+  'Raka: Pantai Matahari, balapan liar, atau kurir — pilih sendiri.',
+  'Raka: Patung Tanjung ada dua belas. Sudah ketemu berapa?',
+];
+
 // One spoken line per mission stage, shown under the objective while the
-// mission runs. Raka talks to himself; Pak Haji runs the garage; Sari
-// hosts the evening radio. Short, in Indonesian, no more than a sentence.
+// mission runs. Raka talks to himself; the lines are short, in Indonesian,
+// never more than a sentence.
 export const DIALOGUE = {
   m1: [
     'Raka: Sedan itu parkir di Pasar Malam. Ambil diam-diam.',
@@ -142,6 +160,16 @@ export const DIALOGUE = {
   ],
 };
 
+// A second line for a few stages, picked once when the stage starts, so a
+// replayed mission does not always sound identical.
+export const ALT_DIALOGUE = {
+  m1: { 0: 'Raka: Pasar Malam ramai. Bagus — makin ramai, makin gampang hilang.' },
+  m3: { 0: 'Raka: Anak pantai itu sombong. Buktikan mereka salah.' },
+  m6: { 0: 'Raka: Sirene di mana-mana. Tahan, Raka, tahan.' },
+  m7: { 0: 'Raka: Pasar ini rumahku. Gang Sanca tidak boleh menang.' },
+  m8: { 1: 'Raka: Mesin Panther ini gila. Pelabuhan, aku datang!' },
+};
+
 export class MissionSys {
   constructor(city, rng) {
     this.city = city;
@@ -159,15 +187,26 @@ export class MissionSys {
     this.raceIndex = 0;
     this.timer = 0;
     this.allComplete = false;
+    this.stageDialogue = ''; // alternate line chosen for this stage, if any
   }
 
-  loc(name) { return this.city.locations[name]; }
+  loc(name) {
+    return this.city.locations[name];
+  }
 
-  showBanner(title, sub) { this.banner = { title, sub, t: 0 }; }
+  showBanner(title, sub) {
+    this.banner = { title, sub, t: 0 };
+  }
 
   // The spoken line for the current stage, or '' when no mission runs.
-  currentDialogue() {
-    if (!this.active) return '';
+  // Free roam falls back to Raka's idle mutterings, rotated by time.
+  currentDialogue(freeRoamIndex = -1) {
+    if (!this.active) {
+      if (freeRoamIndex < 0) return '';
+      return FREE_ROAM_LINES[freeRoamIndex % FREE_ROAM_LINES.length];
+    }
+    // The stage's alternate line, when one was picked at stage start.
+    if (this.stageDialogue) return this.stageDialogue;
     const lines = DIALOGUE[this.active.mission.id];
     if (!lines) return '';
     return lines[Math.min(this.active.stage, lines.length - 1)] ?? '';
@@ -207,10 +246,23 @@ export class MissionSys {
     }));
   }
 
+  // The next mission the player will play, for the map screen's
+  // "Misi Berikutnya" line. Null when the story is finished.
+  nextMission() {
+    const m = MISSIONS[this.index];
+    if (!m) return null;
+    return { chapter: CHAPTERS[m.chapter], title: m.title, briefing: m.briefing };
+  }
+
   startMission(i) {
     const m = MISSIONS[i];
-    if (!m) { this.allComplete = true; return; }
-    this.index = i; // the current mission, so the HUD stage line reads Misi 6/8, not 1/8
+    if (!m) {
+      this.allComplete = true;
+      return;
+    }
+    // Set the index here, so the HUD stage line reads "Misi 6/8" while
+    // mission 6 runs — not "Misi 1/8".
+    this.index = i;
     this.active = { mission: m, stage: 0, data: {} };
     this.showBanner(`${CHAPTERS[m.chapter]}`, `${m.title} — ${m.briefing}`);
     this.setupStage();
@@ -222,6 +274,9 @@ export class MissionSys {
     this.raceIndex = 0;
     this.collectibles = [];
     this.spawnedPeds = [];
+    // Pick the stage's alternate line half the time, once per stage.
+    const alt = ALT_DIALOGUE[this.active.mission.id]?.[this.active.stage];
+    this.stageDialogue = alt && this.rng.float() < 0.5 ? alt : '';
     if (stage.type === 'goto' || stage.type === 'deliver' || stage.type === 'escape') {
       const l = this.loc(stage.loc);
       this.marker = { x: l.x, z: l.z, radius: stage.radius, label: l.name };
@@ -273,11 +328,17 @@ export class MissionSys {
     return r;
   }
 
-  // Side jobs ------------------------------------------------------------
+  // ---- Side jobs ---------------------------------------------------------
+
   startSideJob(kind, playerPos) {
     if (this.active || this.sideJob) return false;
     const job = SIDE_JOBS[kind];
-    this.sideJob = { kind, ...job, stage: 0, timer: kind === 'delivery' ? 80 : kind === 'race' ? 60 : 0 };
+    this.sideJob = {
+      kind,
+      ...job,
+      stage: 0,
+      timer: kind === 'delivery' ? 80 : kind === 'race' ? 60 : 0,
+    };
     if (kind === 'taxi') {
       this.marker = { x: playerPos.x + 10, z: playerPos.z + 6, radius: 6, label: 'Penumpang' };
       this.objective = 'Jemput penumpang taksi';
@@ -287,7 +348,10 @@ export class MissionSys {
       this.objective = 'Ambil paket di Pasar Malam';
     } else if (kind === 'race') {
       this.raceIndex = 0;
-      const pts = [{ x: -200, z: 240 }, { x: -80, z: 240 }, { x: 40, z: 240 }, { x: 160, z: 200 }, { x: 160, z: 80 }];
+      const pts = [
+        { x: -200, z: 240 }, { x: -80, z: 240 }, { x: 40, z: 240 },
+        { x: 160, z: 200 }, { x: 160, z: 80 },
+      ];
       this.sideJob.points = pts;
       this.marker = { x: pts[0].x, z: pts[0].z, radius: 9, label: 'Gerbang 1/5' };
       this.objective = 'Balap liar: lewati 5 gerbang';
@@ -308,13 +372,18 @@ export class MissionSys {
     }
   }
 
-  // Per-frame checks. ctx: {player, playerCar, police, game}
+  // ---- Per-frame checks ---------------------------------------------------
+
+  // ctx: {player, playerCar, police, game}
   update(dt, ctx) {
     if (this.banner) {
       this.banner.t += dt;
       if (this.banner.t > 5) this.banner = null;
     }
-    if (this.sideJob) { this.updateSideJob(dt, ctx); return; }
+    if (this.sideJob) {
+      this.updateSideJob(dt, ctx);
+      return;
+    }
     if (!this.active) return;
     const stage = this.active.mission.stages[this.active.stage];
     const px = ctx.playerCar ? ctx.playerCar.x : ctx.player.x;
@@ -322,10 +391,7 @@ export class MissionSys {
     if (stage.time) {
       this.timer -= dt;
       if (this.timer <= 0) {
-        this.showBanner('GAGAL', 'Waktu habis. Coba lagi dari awal misi.');
-        this.active = null;
-        this.marker = null;
-        this.objective = 'Misi gagal. Pergi ke penanda kuning untuk mengulang.';
+        this.failMission('Waktu habis. Coba lagi dari awal misi.');
         return;
       }
     }
@@ -344,8 +410,9 @@ export class MissionSys {
         const p = stage.points[this.raceIndex];
         if (dist2D(px, pz, p.x, p.z) < 9) {
           this.raceIndex++;
-          if (this.raceIndex >= stage.points.length) this.advanceStage();
-          else {
+          if (this.raceIndex >= stage.points.length) {
+            this.advanceStage();
+          } else {
             const np = stage.points[this.raceIndex];
             this.marker = { x: np.x, z: np.z, radius: 9, label: `Gerbang ${this.raceIndex + 1}/${stage.points.length}` };
           }
@@ -366,10 +433,7 @@ export class MissionSys {
         this.timer -= dt;
         if (ctx.police.wanted < (stage.wanted ?? 1)) {
           // Lost the heat: fail the stage, keep the mission.
-          this.showBanner('GAGAL', 'Bintangmu hilang. Polisi harus tetap mengejarmu.');
-          this.active = null;
-          this.marker = null;
-          this.objective = 'Misi gagal. Pergi ke penanda kuning untuk mengulang.';
+          this.failMission('Bintangmu hilang. Polisi harus tetap mengejarmu.');
           return;
         }
         if (this.timer <= 0) this.advanceStage();
@@ -377,10 +441,7 @@ export class MissionSys {
       }
       case 'escape': {
         if (ctx.police.wanted < (stage.wanted ?? 1)) {
-          this.showBanner('GAGAL', 'Bintangmu hilang sebelum sampai tujuan.');
-          this.active = null;
-          this.marker = null;
-          this.objective = 'Misi gagal. Pergi ke penanda kuning untuk mengulang.';
+          this.failMission('Bintangmu hilang sebelum sampai tujuan.');
           return;
         }
         const l = this.loc(stage.loc);
@@ -392,13 +453,25 @@ export class MissionSys {
     }
   }
 
+  // A failed mission clears the active mission but keeps the story index,
+  // so the player can walk back to the start marker and try again.
+  failMission(reason) {
+    this.showBanner('GAGAL', reason);
+    this.active = null;
+    this.marker = null;
+    this.objective = 'Misi gagal. Pergi ke penanda kuning untuk mengulang.';
+  }
+
   updateSideJob(dt, ctx) {
     const job = this.sideJob;
     const px = ctx.playerCar ? ctx.playerCar.x : ctx.player.x;
     const pz = ctx.playerCar ? ctx.playerCar.z : ctx.player.z;
     if (job.timer > 0) {
       job.timer -= dt;
-      if (job.timer <= 0) { this.finishSideJob(false); return; }
+      if (job.timer <= 0) {
+        this.finishSideJob(false);
+        return;
+      }
     }
     if (job.kind === 'taxi') {
       if (job.stage === 0) {
@@ -427,8 +500,9 @@ export class MissionSys {
       const p = job.points[this.raceIndex];
       if (dist2D(px, pz, p.x, p.z) < 9) {
         this.raceIndex++;
-        if (this.raceIndex >= job.points.length) this.finishSideJob(true);
-        else {
+        if (this.raceIndex >= job.points.length) {
+          this.finishSideJob(true);
+        } else {
           const np = job.points[this.raceIndex];
           this.marker = { x: np.x, z: np.z, radius: 9, label: `Gerbang ${this.raceIndex + 1}/5` };
         }
