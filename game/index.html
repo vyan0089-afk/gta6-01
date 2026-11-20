@@ -7,7 +7,7 @@
 <style>
   html, body { margin: 0; height: 100%; overflow: hidden; background: #0e1a24; font-family: 'Segoe UI', system-ui, sans-serif; }
   #game { position: fixed; inset: 0; width: 100%; height: 100%; display: block; touch-action: none; }
-  #status { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap; }
+  #sr-status { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap; }
   #hud { position: fixed; inset: 0; pointer-events: none; color: #fff; }
   #vignette { position: absolute; inset: 0; box-shadow: inset 0 0 120px rgba(255,0,0,0); transition: box-shadow .15s; }
   #vignette.hit { box-shadow: inset 0 0 120px rgba(255,0,0,.55); }
@@ -20,14 +20,21 @@
   .fill.armour { background: linear-gradient(90deg, #3498db, #70a1ff); width: 0%; }
   #money { font-size: 22px; font-weight: 800; text-shadow: 0 2px 3px #000; color: #7bed9f; }
   #respect { font-size: 12px; text-shadow: 0 1px 2px #000; opacity: .95; }
+  .bar .num { font-size: 11px; font-weight: 700; width: 26px; text-shadow: 0 1px 2px #000; }
   #wanted { position: absolute; top: 12px; right: 16px; font-size: 30px; letter-spacing: 4px; text-shadow: 0 2px 4px #000; }
   #wanted .star { color: rgba(255,255,255,.25); }
   #wanted .star.on { color: #ffd23f; }
+  #clock { position: absolute; top: 54px; right: 18px; font-size: 13px; font-weight: 700; text-shadow: 0 1px 2px #000; }
   #objective { position: absolute; top: 14px; left: 50%; transform: translateX(-50%); text-align: center; background: rgba(0,0,0,.55); padding: 8px 18px; border-radius: 8px; border: 1px solid rgba(255,210,63,.5); max-width: 520px; }
+  #stageLine { font-size: 11px; font-weight: 700; letter-spacing: 1px; color: #ffd23f; text-transform: uppercase; }
+  #objCounter { font-size: 14px; font-weight: 800; color: #7bed9f; margin-top: 2px; }
+  #dialogue { position: absolute; bottom: 210px; left: 50%; transform: translateX(-50%); background: rgba(0,0,0,.6); padding: 7px 14px; border-radius: 8px; font-size: 14px; font-style: italic; border-left: 3px solid #ffd23f; display: none; max-width: 560px; text-align: center; }
   #objText { font-size: 15px; font-weight: 600; }
   #objTimer { font-size: 13px; color: #ffd23f; font-weight: 700; }
   #feed { position: absolute; top: 110px; right: 16px; width: 300px; text-align: right; font-size: 12px; }
   .feedLine { background: rgba(0,0,0,.5); padding: 4px 8px; margin-bottom: 4px; border-radius: 5px; border-right: 3px solid #3498db; }
+  #policeInfo { position: absolute; top: 240px; right: 16px; width: 300px; text-align: right; font-size: 12px; }
+  .policeLine { background: rgba(0,0,0,.5); padding: 4px 8px; margin-bottom: 4px; border-radius: 5px; border-right: 3px solid #ff3b30; }
   #prompt { position: absolute; bottom: 150px; left: 50%; transform: translateX(-50%); background: rgba(0,0,0,.65); padding: 8px 16px; border-radius: 8px; font-size: 15px; border: 1px solid rgba(255,255,255,.4); display: none; }
   #banner { position: absolute; top: 32%; left: 50%; transform: translateX(-50%); text-align: center; opacity: 0; transition: opacity .4s; }
   #banner.show { opacity: 1; }
@@ -37,6 +44,7 @@
   #speedNum { font-size: 46px; font-weight: 900; text-shadow: 0 2px 4px #000; }
   #speedUnit { font-size: 14px; margin-left: 4px; }
   #carName { font-size: 13px; color: #ffd23f; text-shadow: 0 1px 2px #000; }
+  #carCond { font-size: 12px; color: #dfe9f3; text-shadow: 0 1px 2px #000; }
   #radio { position: absolute; bottom: 16px; left: 250px; font-size: 13px; text-shadow: 0 1px 2px #000; background: rgba(0,0,0,.45); padding: 6px 10px; border-radius: 6px; }
   #radio span { color: #ffd23f; }
   #wheel { position: absolute; bottom: 120px; left: 50%; transform: translateX(-50%); display: none; gap: 10px; }
@@ -57,11 +65,23 @@
   .help b { color: #ffd23f; }
   .shopRow { text-align: left; background: rgba(255,255,255,.06); border-radius: 8px; padding: 10px 12px; margin-bottom: 8px; font-size: 14px; }
   .shopRow button { padding: 5px 14px; font-size: 14px; margin-left: 8px; }
+  .mapPanel { max-width: 880px; max-height: 92vh; overflow-y: auto; text-align: left; }
+  .mapPanel h2 { text-align: center; }
+  .mapClock { text-align: center; font-size: 13px; font-weight: 700; color: #ffd23f; margin-bottom: 8px; }
+  .mapGrid { display: grid; grid-template-columns: 320px 1fr; gap: 18px; align-items: start; }
+  .mapCol { min-width: 0; }
+  #bigmap { display: block; border: 2px solid rgba(255,255,255,.5); border-radius: 8px; background: rgba(10,30,25,.85); }
+  .mapBtns { flex-direction: row; justify-content: center; flex-wrap: wrap; }
+  .mapBtns button { flex: 1 1 160px; }
+  .mapSec { margin: 12px 0; }
+  .mapSec h3 { margin: 0 0 6px; color: #ffd23f; font-size: 14px; letter-spacing: 1px; }
+  .mapRow { display: flex; justify-content: space-between; gap: 12px; font-size: 13px; padding: 4px 2px; border-bottom: 1px solid rgba(255,255,255,.08); }
+  .mapRow b { white-space: nowrap; }
 </style>
 </head>
 <body>
 <canvas id="game" aria-label="Tanjung Matahari: game dunia terbuka 3D, berjalan kaki dan mengemudi di kota pantai"></canvas>
-<p id="status" role="status" aria-live="polite"></p>
+<p id="sr-status" role="status" aria-live="polite"></p>
 <div id="hud"></div>
 <script type="module" src="./src/main.js"></script>
 </body>
