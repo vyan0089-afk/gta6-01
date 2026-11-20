@@ -19,9 +19,12 @@ Raka, a driver from the harbour district, is drawn into the Tanjung underworld. 
 - **Combat** — fists, pistol and shotgun, with a weapon wheel (hold **Q**, or **1/2/3**).
 - **Progression** — money, respect ranks (Anak Baru → Sopir Handal → Juragan Jalanan → Legenda Tanjung), a garage with engine / armour / paint upgrades.
 - **Side jobs** — taxi fares, courier deliveries and street races.
-- **Save / load** — autosave after every mission, Continue / New Game on the title screen, localStorage only.
-- **Radio** — three stations (Radio Matahari, Pantai FM, Kota FM) with synthesised tracks; **R** changes station.
-- **HUD** — health, armour, money, wanted stars, live minimap with mission markers and a north arrow, objective text, speed, dispatch feed.
+- **Save / load** — autosave after every mission, Continue / New Game on the title screen, two save slots on the map screen, localStorage only.
+- **Collectibles** — 12 golden Patung Tanjung statues hidden near the city's landmarks.
+- **Radio** — four stations (Radio Matahari, Pantai FM, Kota FM, Senja FM for the golden hour) with synthesised tracks; **R** changes station.
+- **HUD** — health/armour with numbers, money, respect rank, wanted stars, in-game clock, mission stage (e.g. "Misi 6/8 · Tahap 1/2"), objective counters ("Usir 2/5"), a spoken line from Raka during missions, vehicle name + speed + condition, chasing police units with distance, live minimap with mission markers and a north arrow, objective text, dispatch feed.
+- **Map screen (M)** — a big map of Tanjung, all 8 story missions with progress, career stats, the 12 Patung Tanjung statues (X/12) and two save slots.
+- **Lighting** — three deterministic presets: bright midday, golden hour (low warm sun, orange haze) and night (lamps and headlights carry the scene).
 
 ## Controls
 
@@ -36,6 +39,7 @@ Raka, a driver from the harbour district, is drawn into the Tanjung underworld. 
 | Q (hold) / 1 2 3 | Weapon wheel / switch weapon |
 | R | Change radio station |
 | Space | Handbrake |
+| M | Map, missions & saves |
 | Esc | Pause |
 
 ## How to run
@@ -47,16 +51,25 @@ node serve.ts
 
 Just static files: `game/index.html` plus the ES modules under `game/src/`. No build step, no internet needed.
 
+## Screenshots
+
+Four staged, deterministic shots (`shots.json`, `?shot=` + `seed=1`):
+
+1. `1-chase.jpg` — golden-hour chase on Jalan Pantai: wanted 4, helicopter, patrol cars and traffic on the road.
+2. `2-mission.jpg` — golden-hour fight in Pasar Malam: Raka vs Gang Sanca, counter at "Usir 2/5".
+3. `3-drive-night.jpg` — night drive on Jalan Merdeka in the gold Panther GT, wanted 2.
+4. `4-map.jpg` — the map screen: big map, 8 missions with progress, career stats, statues 4/12, save slots.
+
 ## How it is built
 
-- `game/src/renderer.js` — from-scratch WebGL renderer (one shader, vertex-lit boxes; static city mesh + dynamic buffer).
-- `game/src/city.js` — deterministic city generation (seeded RNG): streets, buildings, market, harbour, villas, palms, road graph.
+- `game/src/renderer.js` — from-scratch WebGL renderer (one shader, vertex-lit boxes; static city mesh + dynamic buffer) with day / golden-hour / night lighting presets.
+- `game/src/city.js` — deterministic city generation (seeded RNG): streets, buildings, market, harbour, villas, palms, warung carts on Jalan Pantai, road graph.
 - `game/src/vehicles.js` — arcade car physics, traffic AI on the road graph.
 - `game/src/peds.js` — pedestrians and hostile gang members.
 - `game/src/police.js` — wanted system, chases, helicopter, roadblocks, dispatch.
-- `game/src/missions.js` — 8 story missions + side jobs, all staged.
-- `game/src/hud.js` — HUD, minimap, menus.
+- `game/src/missions.js` — 8 story missions + side jobs, all staged, with per-stage dialogue and objective counters.
+- `game/src/hud.js` — HUD, minimap, map screen, menus.
 - `game/src/audio.js` — synthesised sound: engine, sirens, gunshots, radio.
-- `game/src/game.js` — world state, player, combat, garage, save.
-- `game/src/main.js` — bootstrap, game loop, deterministic screenshot staging (`?shot=title|drive|mission|city`).
+- `game/src/game.js` — world state, player, combat, garage, save, statues, map screen.
+- `game/src/main.js` — bootstrap, game loop, deterministic screenshot staging (`?shot=chase|mission|drive|map`).
 - `main.ts` — the grader entrypoint: copies `game/` and `screenshots/` to `/output` and writes `dossier.json`.
