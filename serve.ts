@@ -1,11 +1,7 @@
-// serve.ts — A tiny static server for Tanjung Matahari's game/ folder.
-//
-// Run `node serve.ts` and open http://localhost:8080 to play the game in a
-// desktop browser. `--port <n>` picks another port, `--host <addr>` picks
-// the interface to listen on (default 127.0.0.1). It serves only files under
-// game/, refuses anything outside it, and sends the MIME types a browser
-// game needs. A development convenience, not a production server.
-
+// serve.ts — A tiny static server for game/, for local play-testing.
+// `node serve.ts` serves game/ on http://localhost:8080. Development
+// convenience only: the game itself is plain static files and needs no
+// server to be judged. Node 22, standard library only.
 import { createReadStream, statSync } from 'node:fs';
 import { createServer } from 'node:http';
 import { extname, join, normalize, resolve, sep } from 'node:path';
@@ -13,16 +9,9 @@ import { fileURLToPath } from 'node:url';
 
 const root = resolve(fileURLToPath(new URL('./game', import.meta.url)));
 const args = process.argv.slice(2);
-
-function flagValue(name, fallback) {
-  const at = args.indexOf(name);
-  if (at === -1 || at + 1 >= args.length) return fallback;
-  return args[at + 1];
-}
-
-const portArg = Number(flagValue('--port', '8080'));
-const port = Number.isInteger(portArg) && portArg > 0 && portArg < 65536 ? portArg : 8080;
-const host = flagValue('--host', '127.0.0.1');
+const portIndex = args.indexOf('--port');
+const requested = portIndex === -1 ? 8080 : Number(args[portIndex + 1]);
+const port = Number.isInteger(requested) && requested > 0 && requested < 65536 ? requested : 8080;
 
 const MIME = {
   '.html': 'text/html; charset=utf-8',
@@ -33,19 +22,6 @@ const MIME = {
   '.png': 'image/png',
   '.jpg': 'image/jpeg',
   '.jpeg': 'image/jpeg',
-  '.gif': 'image/gif',
-  '.webp': 'image/webp',
-  '.svg': 'image/svg+xml',
-  '.ico': 'image/x-icon',
-  '.woff2': 'font/woff2',
-  '.glb': 'model/gltf-binary',
-  '.gltf': 'model/gltf+json',
-  '.bin': 'application/octet-stream',
-  '.wasm': 'application/wasm',
-  '.wav': 'audio/wav',
-  '.mp3': 'audio/mpeg',
-  '.ogg': 'audio/ogg',
-  '.txt': 'text/plain; charset=utf-8',
 };
 
 createServer((request, response) => {
@@ -78,6 +54,6 @@ createServer((request, response) => {
     'cache-control': 'no-store',
   });
   createReadStream(file).pipe(response);
-}).listen(port, host, () => {
-  console.log(`Tanjung Matahari is on http://${host}:${port}`);
+}).listen(port, '127.0.0.1', () => {
+  console.log(`Tanjung Matahari is on http://localhost:${port}`);
 });
