@@ -1,79 +1,100 @@
 # Tanjung Matahari
 
-[![gta6-01](https://make.fun/badge/gta6-01.svg)](https://make.fun/bounty/gta6-01)
-[![rank](https://make.fun/badge/gta6-01/vyan0089-afk/gta6-01/rank.svg)](https://make.fun/bounty/gta6-01)
-[![reward](https://make.fun/badge/gta6-01/vyan0089-afk/gta6-01/reward.svg)](https://make.fun/bounty/gta6-01)
+[![gta6-01](https://make.fun/badge/gta6-01.svg)](https://make.fun/c/gta6-01)
+[![rank](https://make.fun/badge/gta6-01/vyan0089-afk/gta6-01/rank.svg)](https://make.fun/c/gta6-01)
+[![reward](https://make.fun/badge/gta6-01/vyan0089-afk/gta6-01/reward.svg)](https://make.fun/c/gta6-01)
 
-**Tanjung Matahari** is an original 3D open-world crime game set in a sun-soaked Indonesian coastal city, built for the [make.fun gta6-01 bounty](https://make.fun/bounty/gta6-01). No Rockstar assets, no libraries, no network — the whole game is hand-written JavaScript and a from-scratch WebGL renderer.
+An open-world crime game in the spirit of GTA 6, built from scratch for the
+[make.fun](https://make.fun) **gta6-01** bounty. Raka comes home broke to
+Tanjung Matahari, an original Indonesian coastal city — and the whole city is
+about to learn his name.
 
-## The story
+## The game
 
-Raka, a driver from the harbour district, is drawn into the Tanjung underworld. Across **8 staged story missions in 3 chapters** he steals cars, races the beach road, smuggles crates through the harbour, settles old debts, survives a 3-star manhunt, fights a gang war, and pulls off one last heist: a gold Panther GT from a hillside villa, escaping a 5-star dragnet to the boats.
-
-## What is in the game
-
-- **A living city** — grid streets, a night market, the harbour with pier and cranes, a beach, an old town and hillside villas, all built from low-poly boxes with a warm palette (sand, terracotta, teal sea). Traffic is dense: 32 cars on the road graph plus 20 parked cars, and 60 pedestrians on the sidewalks.
-- **On foot and by car** — walk, run, punch, shoot; enter any car with **E** (parked and traffic cars are stealable — stealing raises your wanted level).
-- **Traffic and pedestrians** — cars follow the road network and brake for the car ahead; pedestrians stroll the sidewalks and flee from gunfire, speeding cars and police chases.
-- **Wanted level 1–5 stars** — police patrol cars chase on the road graph, named dispatch units radio in (Elang-1, Kancil-2, Garuda-3…), a helicopter joins at 4 stars, roadblocks close the city at 5. Heat cools off if you stay out of trouble.
-- **Combat** — fists, pistol and shotgun, with a weapon wheel (hold **Q**, or **1/2/3**) that shows ammo for each gun.
-- **Progression** — money, respect ranks (Anak Baru → Sopir Handal → Juragan Jalanan → Legenda Tanjung), a garage with engine / armour / paint upgrades.
-- **Side jobs** — taxi fares, courier deliveries and street races.
-- **Save / load** — autosave after every mission, Continue / New Game on the title screen, two save slots on the map screen, localStorage only.
-- **Collectibles** — 12 golden Patung Tanjung statues hidden near the city's landmarks.
-- **Radio** — four stations (Radio Matahari, Pantai FM, Kota FM, Senja FM for the golden hour) with synthesised tracks; **R** changes station.
-- **HUD** — health/armour with numbers, money, respect rank, wanted stars, in-game clock, mission stage (e.g. "Misi 6/8 · Tahap 1/2"), objective counters ("Usir 2/5"), a spoken line from Raka during missions, vehicle name + speed + condition, chasing police units with distance, live minimap with mission markers and a north arrow, objective text, dispatch feed.
-- **Map screen (M)** — a big map of Tanjung, all 8 story missions with progress, career stats, the 12 Patung Tanjung statues (X/12) and two save slots.
-- **Lighting** — three deterministic presets: bright midday, golden hour (low warm sun, orange haze) and night (lamps and headlights carry the scene).
+- **A living city**: a 900 × 900 m grid of named streets (Jalan Merdeka, Jalan
+  Pantai Barat, Jalan Tanjung Raya…), ~32 traffic cars, ~60 pedestrians,
+  ~20 parked cars, a night market (Pasar Malam), a harbour full of containers,
+  a beach, and a lighthouse on the north-west point.
+- **Eight story missions in three chapters**: from meeting Sari at the market,
+  through collecting the Gang Sanca's debt and a beach chase, to storming the
+  gang's stronghold and a five-star escape to the lighthouse.
+- **Wanted 1–5**: named police units chase Raka, a helicopter joins at 4★,
+  roadblocks go up at 5★, and a bust timer runs when the police corner him on
+  foot. Getting caught costs a fine and a trip to Rumah Sakit Harapan.
+- **Stealable cars**: press E near any parked or traffic car. Theft raises
+  the wanted level. Eight vehicle models, from the City Car to the red Sport.
+- **Combat**: fists, pistol and shotgun with real ammo counts, a weapon wheel
+  (Q), and enemies who chase and fight back.
+- **Progression**: respect ranks from Anak Baru to Legenda Tanjung, three
+  side jobs (Ojek Kilat, Antar Paket, Taksi Senja), 12 golden keris to find,
+  and career stats on the map screen.
+- **Presentation**: a custom WebGL2 engine (no libraries), day / golden-hour /
+  night lighting, a rich HUD with health and armour numbers, money, mission
+  stage and objective counters, dialogue lines, police-unit distances, speed
+  and the radio station, a live minimap, and a full map screen
+  (**PETA TANJUNG MATAHARI**). Three synthesised radio stations — Dangdut
+  Pantura FM, Radio Senja FM, Rock Tanjung FM — plus engine hum, a horn, a
+  mission-complete jingle and gunshots, all generated with WebAudio.
+- **Save**: three localStorage slots from the pause menu; New Game clears them.
 
 ## Controls
 
 | Key | Action |
 | --- | --- |
-| W A S D / arrows | Walk / drive (gas, brake, steer) |
-| Mouse (drag) | Orbit camera |
-| E | Enter/exit car, take crates, start jobs, open garage |
-| Shift | Run |
-| F | Punch |
-| Left click | Shoot |
-| Q (hold) / 1 2 3 | Weapon wheel / switch weapon |
-| H | Klakson (di dalam mobil) |
+| W A S D | Walk / drive |
+| Shift | Sprint |
+| E | Enter / exit a car (steal it) |
+| F / left click | Punch / shoot |
+| Q | Weapon wheel |
+| 1 / 2 / 3 | Fists / pistol / shotgun |
 | R | Change radio station |
-| Space | Handbrake |
-| M | Map, missions & saves |
-| Esc | Pause |
+| H | Horn |
+| M | Map of Tanjung Matahari |
+| J | Start a side job nearby |
+| Esc / P | Pause & save |
 
-## How to run
+Drag the mouse to orbit the camera.
+
+## Play it
 
 ```sh
 node serve.ts
 # open http://localhost:8080
 ```
 
-Just static files: `game/index.html` plus the ES modules under `game/src/`. No build step, no internet needed.
+No build step, no network: `game/` is plain static files and plays offline in
+desktop Chrome.
 
 ## Screenshots
 
-Four staged, deterministic shots (`shots.json`, `?shot=` + `seed=1`):
+The four screenshots in `screenshots/` are real renders of the game, staged
+by `game/src/shots.js` through `?shot=chase|mission|drive-night|map`:
 
-1. `1-chase.jpg` — golden-hour chase on Jalan Pantai: wanted 4, helicopter, patrol cars and traffic on the road.
-2. `2-mission.jpg` — golden-hour fight in Pasar Malam: Raka vs Gang Sanca, counter at "Usir 2/5".
-3. `3-drive-night.jpg` — night drive on Jalan Merdeka in the gold Panther GT, wanted 2.
-4. `4-map.jpg` — the map screen: big map, 8 missions with progress, career stats, statues 4/12, save slots.
+1. `1-chase.jpg` — golden-hour chase: the red sport car, police helicopter,
+   traffic, 4 wanted stars, HUD, minimap and radio.
+2. `2-mission.jpg` — on foot at Gang Sanca, small yellow diamond marker,
+   objective counter "Usir 2/5".
+3. `3-drive-night.jpg` — night drive down Jalan Merdeka, 2 stars.
+4. `4-map.jpg` — the PETA TANJUNG MATAHARI screen.
 
-## Determinism
+## Layout
 
-Everything random in the game comes from a seeded generator (`game/src/rng.js`, mulberry32) — never from `Math.random()`. One seed builds the same city, the same traffic and the same pedestrians every time, so the four screenshots are reproducible: load `game/index.html?shot=chase&seed=1` (or `mission`, `drive`, `map`) and the staged frame is the same on every run. The lighting presets are fixed too, so golden hour always looks like golden hour. The grader entrypoint (`main.ts`) is deterministic as well: run it twice and `/output` comes out byte-identical.
+- `game/index.html` — page, HUD and menus
+- `game/src/main.js` — game object, loop, input, camera, screens
+- `game/src/render.js` — custom WebGL2 renderer
+- `game/src/world.js` — seeded city, traffic and pedestrians
+- `game/src/player.js` — walking, driving, stealing, combat
+- `game/src/police.js` — wanted system, chases, helicopter, roadblocks
+- `game/src/missions.js` — 8 story missions, side jobs, dialogue
+- `game/src/hud.js` — HUD, minimap, map screen
+- `game/src/audio.js` — WebAudio synth: radio, engine, jingle, gunshots
+- `game/src/save.js` — localStorage save slots and career stats
+- `game/src/shots.js` — the four screenshot scenes
+- `game/src/config.js` — streets, vehicles, weapons, radio, ranks
+- `game/src/rng.js` — seeded RNG
+- `main.ts` — the entry program (copies game/ + screenshots/ to /output)
+- `serve.ts` — local static server
 
-## How it is built
+## License
 
-- `game/src/renderer.js` — from-scratch WebGL renderer (one shader, vertex-lit boxes; static city mesh + dynamic buffer) with day / golden-hour / night lighting presets.- `game/src/city.js` — deterministic city generation (seeded RNG): streets, buildings, market, harbour, villas, palms, warung carts on Jalan Pantai, road graph.
-- `game/src/vehicles.js` — arcade car physics, traffic AI on the road graph.
-- `game/src/peds.js` — pedestrians and hostile gang members.
-- `game/src/police.js` — wanted system, chases, helicopter, roadblocks, dispatch.
-- `game/src/missions.js` — 8 story missions + side jobs, all staged, with per-stage dialogue and objective counters.
-- `game/src/hud.js` — HUD, minimap, map screen, menus.
-- `game/src/audio.js` — synthesised sound: engine, sirens, gunshots, radio.
-- `game/src/game.js` — world state, player, combat, garage, save, statues, map screen.
-- `game/src/main.js` — bootstrap, game loop, deterministic screenshot staging (`?shot=chase|mission|drive|map`).
-- `main.ts` — the grader entrypoint: copies `game/` and `screenshots/` to `/output` and writes `dossier.json`.
+MIT — see `LICENSE`.
