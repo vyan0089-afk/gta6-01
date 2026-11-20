@@ -12,11 +12,11 @@ Raka, a driver from the harbour district, is drawn into the Tanjung underworld. 
 
 ## What is in the game
 
-- **A living city** — grid streets, a night market, the harbour with pier and cranes, a beach, an old town and hillside villas, all built from low-poly boxes with a warm palette (sand, terracotta, teal sea).
+- **A living city** — grid streets, a night market, the harbour with pier and cranes, a beach, an old town and hillside villas, all built from low-poly boxes with a warm palette (sand, terracotta, teal sea). Traffic is dense: 32 cars on the road graph plus 20 parked cars, and 60 pedestrians on the sidewalks.
 - **On foot and by car** — walk, run, punch, shoot; enter any car with **E** (parked and traffic cars are stealable — stealing raises your wanted level).
-- **Traffic and pedestrians** — cars follow the road network, pedestrians stroll the sidewalks and flee from gunfire and speeding cars.
-- **Wanted level 1–5 stars** — police patrol cars chase on the road graph, named dispatch units radio in (Elang-1, Kancil-2, Garuda-3…), a helicopter joins at 4 stars, roadblocks close the city at 5.
-- **Combat** — fists, pistol and shotgun, with a weapon wheel (hold **Q**, or **1/2/3**).
+- **Traffic and pedestrians** — cars follow the road network and brake for the car ahead; pedestrians stroll the sidewalks and flee from gunfire, speeding cars and police chases.
+- **Wanted level 1–5 stars** — police patrol cars chase on the road graph, named dispatch units radio in (Elang-1, Kancil-2, Garuda-3…), a helicopter joins at 4 stars, roadblocks close the city at 5. Heat cools off if you stay out of trouble.
+- **Combat** — fists, pistol and shotgun, with a weapon wheel (hold **Q**, or **1/2/3**) that shows ammo for each gun.
 - **Progression** — money, respect ranks (Anak Baru → Sopir Handal → Juragan Jalanan → Legenda Tanjung), a garage with engine / armour / paint upgrades.
 - **Side jobs** — taxi fares, courier deliveries and street races.
 - **Save / load** — autosave after every mission, Continue / New Game on the title screen, two save slots on the map screen, localStorage only.
@@ -37,6 +37,7 @@ Raka, a driver from the harbour district, is drawn into the Tanjung underworld. 
 | F | Punch |
 | Left click | Shoot |
 | Q (hold) / 1 2 3 | Weapon wheel / switch weapon |
+| H | Klakson (di dalam mobil) |
 | R | Change radio station |
 | Space | Handbrake |
 | M | Map, missions & saves |
@@ -60,10 +61,13 @@ Four staged, deterministic shots (`shots.json`, `?shot=` + `seed=1`):
 3. `3-drive-night.jpg` — night drive on Jalan Merdeka in the gold Panther GT, wanted 2.
 4. `4-map.jpg` — the map screen: big map, 8 missions with progress, career stats, statues 4/12, save slots.
 
+## Determinism
+
+Everything random in the game comes from a seeded generator (`game/src/rng.js`, mulberry32) — never from `Math.random()`. One seed builds the same city, the same traffic and the same pedestrians every time, so the four screenshots are reproducible: load `game/index.html?shot=chase&seed=1` (or `mission`, `drive`, `map`) and the staged frame is the same on every run. The lighting presets are fixed too, so golden hour always looks like golden hour. The grader entrypoint (`main.ts`) is deterministic as well: run it twice and `/output` comes out byte-identical.
+
 ## How it is built
 
-- `game/src/renderer.js` — from-scratch WebGL renderer (one shader, vertex-lit boxes; static city mesh + dynamic buffer) with day / golden-hour / night lighting presets.
-- `game/src/city.js` — deterministic city generation (seeded RNG): streets, buildings, market, harbour, villas, palms, warung carts on Jalan Pantai, road graph.
+- `game/src/renderer.js` — from-scratch WebGL renderer (one shader, vertex-lit boxes; static city mesh + dynamic buffer) with day / golden-hour / night lighting presets.- `game/src/city.js` — deterministic city generation (seeded RNG): streets, buildings, market, harbour, villas, palms, warung carts on Jalan Pantai, road graph.
 - `game/src/vehicles.js` — arcade car physics, traffic AI on the road graph.
 - `game/src/peds.js` — pedestrians and hostile gang members.
 - `game/src/police.js` — wanted system, chases, helicopter, roadblocks, dispatch.
