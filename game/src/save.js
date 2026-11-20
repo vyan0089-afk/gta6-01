@@ -1,136 +1,193 @@
-// save.js — Saving Tanjung Matahari.
-//
-// Three save slots in localStorage, plus the career stats that the map
-// screen shows. A slot holds everything needed to resume: Raka's position,
-// health, armour, money, weapons and ammo, the mission index and which
-// missions are done, the wanted level, the clock, the radio station, the
-// collectibles taken, and the career totals. New Game wipes all three slots
-// first, so a fresh story never inherits an old one. Every read is wrapped
-// so a corrupt or foreign slot is treated as empty, never as a crash —
-// localStorage in a file:// page can hold another game's data under the
-// same key, and this game must not die on it.
+// save.js — Save slots and autosave for Tanjung Matahari.
+// Three slots in localStorage, each holding the whole career: position,
+// money, health, mission progress, keris, cars stolen, side jobs, garage
+// and the game clock. Autosave writes slot 0's companion record every
+// minute and after every mission, so a crash never costs a whole evening.
+// Saves are plain JSON: readable, portable and easy to verify in a test.
 
-import { formatClock } from './rng.js';
+import { SAVE } from './config.js';
 
-export const SAVE_PREFIX = 'tanjung-matahari-save-v4-slot-';
-export const SAVE_VERSION = 4;
+/** The key for a slot number (1-based). */
+export function slotKey(slot) {
+  return SAVE.prefix + slot;
+}
 
-/** Fresh career stats. */
-export function freshStats() {
+/** Build a save record from the live game. */
+export function buildSaveRecord(game, slot) {
+  const p = game.player;
   return {
-    missionsCompleted: 0,
-    carsStolen: 0,
-    distanceKm: 0,
-    moneyEarned: 0,
-    shotsFired: 0,
-    arrests: 0,
-    playSeconds: 0,
+    version: 1,
+    slot,
+    savedAt: new Date().toISOString(),
+    money: Math.floor(p.money),
+    health: Math.floor(p.health),
+    armour: Math.floor(p.armour),
+    respect: game.stats.respect,
+    x: Math.round(p.x * 10) / 10,
+    z: Math.round(p.z * 10) / 10,
+    angle: Math.round(p.angle * 100) / 100,
+    hour: Math.round(game.weather.hour * 100) / 100,
+    missionIndex: game.missions.index,
+    missionStage: game.missions.stageIndex,
+    missionsDone: [...game.missions.done],
+    kerisFound: game.world.keris.filter((k) => k.found).map((k) => k.id),
+    carsStolen: game.stats.carsStolen,
+    sideJobsDone: game.stats.sideJobsDone,
+    racesWon: game.stats.racesWon,
+    kills: game.combat.kills,
+    garage: game.garage.cars.map((c) => ({ name: c.name, colour: c.colour })),
+    achievements: [...game.achievements.unlocked],
+    playSeconds: Math.floor(game.stats.playSeconds),
   };
 }
 
-/** The localStorage key for a slot (1, 2 or 3). */
-export function slotKey(slot) {
-  return `${SAVE_PREFIX}${slot}`;
-}
-
-/** Read one slot. Returns the parsed save, or null when empty/corrupt. */
-export function readSlot(slot) {
+/** Write a save record into a slot. Returns true on success. */
+export function writeSave(game, slot) {
   try {
-    const raw = window.localStorage.getItem(slotKey(slot));
-    if (!raw) return null;
-    const data = JSON.parse(raw);
-    if (!data || data.version !== SAVE_VERSION) return null;
-    if (typeof data.money !== 'number' || typeof data.missionIndex !== 'number') return null;
-    return data;
-  } catch (err) {
-    return null;
-  }
-}
-
-/** Write one slot. Returns true when it stuck. */
-export function writeSlot(slot, data) {
-  try {
-    const payload = { ...data, version: SAVE_VERSION, savedAt: Date.now() };
-    window.localStorage.setItem(slotKey(slot), JSON.stringify(payload));
+    const record = buildSaveRecord(game, slot);
+    localStorage.setItem(slotKey(slot), JSON.stringify(record));
     return true;
-  } catch (err) {
+  } catch (e) {
     return false;
   }
 }
 
-/** Wipe all three slots (New Game). Returns how many were cleared. */
-export function clearAllSlots() {
-  let cleared = 0;
-  for (let slot = 1; slot <= 3; slot += 1) {
-    try {
-      if (window.localStorage.getItem(slotKey(slot)) !== null) cleared += 1;
-      window.localStorage.removeItem(slotKey(slot));
-    } catch (err) { /* storage may be unavailable */ }
+/** Read a save record from a slot, or null when empty or corrupt. */
+export function readSave(slot) {
+  try {
+    const raw = localStorage.getItem(slotKey(slot));
+    if (!raw) return null;
+    const data = JSON.parse(raw);
+    if (!data || data.version !== 1) return null;
+    return data;
+  } catch (e) {
+    return null;
   }
-  return cleared;
 }
 
-/** Build a save object from the live game. */
-export function snapshotGame(game) {
-  const p = game.player;
-  return {
-    version: SAVE_VERSION,
-    x: p.x, z: p.z, angle: p.angle,
-    health: p.health, armour: p.armour, money: p.money,
-    weapon: p.weapon, ammo: { ...p.ammo },
-    missionIndex: game.missions.index,
-    completed: [...game.missions.completed],
-    jobsDone: game.missions.jobsDone,
-    wanted: game.police.wanted,
-    clock: game.clockSeconds,
-    station: game.audio.station,
-    collectibles: game.world.collectibles.map((c) => c.taken),
-    stats: { ...game.stats },
-    playSeconds: game.stats.playSeconds,
-  };
+/** Validate a save record field by field; returns a list of problems. */
+export function validateSave(data) {
+  const problems = [];
+  if (!data || typeof data !== 'object') return ['not an object'];
+  if (data.version !== 1) problems.push('version is not 1');
+  if (typeof data.money !== 'number' || data.money < 0) problems.push('money is invalid');
+  if (typeof data.health !== 'number' || data.health < 0 || data.health > 100) problems.push('health is out of range');
+  if (typeof data.x !== 'number' || typeof data.z !== 'number') problems.push('position is missing');
+  if (Math.abs(data.x) > 400 || Math.abs(data.z) > 400) problems.push('position is outside the world');
+  if (typeof data.missionIndex !== 'number' || data.missionIndex < 0 || data.missionIndex > 8) problems.push('missionIndex is out of range');
+  if (!Array.isArray(data.kerisFound)) problems.push('kerisFound is not a list');
+  if (!Array.isArray(data.missionsDone)) problems.push('missionsDone is not a list');
+  if (typeof data.playSeconds !== 'number' || data.playSeconds < 0) problems.push('playSeconds is invalid');
+  return problems;
 }
 
-/** A short human-readable summary of a slot, for the map screen. */
+/** True when a slot holds a valid save. */
+export function slotValid(slot) {
+  const data = readSave(slot);
+  if (!data) return false;
+  return validateSave(data).length === 0;
+}
+
+/** True when a slot holds a save. */
+export function slotHasSave(slot) {
+  return readSave(slot) !== null;
+}
+
+/** Short summary text for a slot, for the map screen. */
 export function slotSummary(slot) {
-  const s = readSlot(slot);
-  if (!s) return null;
-  return {
-    missionIndex: s.missionIndex,
-    money: s.money,
-    clock: formatClock(s.clock),
-    completed: s.completed.length,
-    savedAt: s.savedAt ? new Date(s.savedAt).toLocaleString('id-ID') : '',
-  };
+  const data = readSave(slot);
+  if (!data) return '— kosong —';
+  const date = (data.savedAt || '').slice(0, 10);
+  return `Misi ${data.missionIndex}/8 · Rp ${Math.floor(data.money).toLocaleString('id-ID')} · ${date}`;
 }
 
-/** Apply a save object to a fresh game. Returns true on success. */
-export function applySnapshot(game, save) {
-  if (!save) return false;
-  const p = game.player;
-  p.x = save.x; p.z = save.z; p.angle = save.angle;
-  p.health = save.health; p.armour = save.armour; p.money = save.money;
-  p.weapon = save.weapon || 'fists';
-  p.ammo = { pistol: save.ammo?.pistol ?? 24, shotgun: save.ammo?.shotgun ?? 8 };
-  p.onFoot = true; p.car = null;
-  game.missions.index = save.missionIndex;
-  game.missions.completed = [...(save.completed || [])];
-  game.missions.jobsDone = save.jobsDone || 0;
-  game.missions.finishedStory = save.missionIndex >= 8;
-  game.clockSeconds = save.clock ?? 6 * 3600 + 30 * 60;
-  game.audio.setStation(save.station ?? 0);
-  if (Array.isArray(save.collectibles)) {
-    save.collectibles.forEach((taken, i) => {
-      if (game.world.collectibles[i]) game.world.collectibles[i].taken = !!taken;
-    });
+/** Delete a slot's save. */
+export function clearSave(slot) {
+  try {
+    localStorage.removeItem(slotKey(slot));
+    return true;
+  } catch (e) {
+    return false;
   }
-  if (save.stats) game.stats = { ...freshStats(), ...save.stats };
-  // Resume: the next mission is pending, not auto-started, so the player
-  // chooses the moment. If the story is done, free-roam continues.
-  if (!game.missions.finishedStory) game.pendingMission = save.missionIndex;
-  return true;
 }
 
-/** List all three slots as summaries (null for empty ones). */
-export function listSlots() {
-  return [1, 2, 3].map((slot) => slotSummary(slot));
+/** Export a slot's save as a shareable text block (for the map screen). */
+export function exportSaveText(slot) {
+  const data = readSave(slot);
+  if (!data) return '';
+  return [
+    `TANJUNG MATAHARI — SAVE SLOT ${slot}`,
+    `Misi: ${data.missionIndex}/8 · Uang: Rp ${Math.floor(data.money).toLocaleString('id-ID')}`,
+    `Keris: ${data.kerisFound.length}/12 · Mobil dicuri: ${data.carsStolen}`,
+    `Pekerjaan: ${data.sideJobsDone} · Balapan menang: ${data.racesWon}`,
+    `Disimpan: ${data.savedAt}`,
+  ].join('\n');
+}
+
+/** Compare two slots: which career is further along? */
+export function compareSlots(a, b) {
+  const da = readSave(a);
+  const db = readSave(b);
+  if (!da) return db ? b : 0;
+  if (!db) return a;
+  const score = (d) => d.missionIndex * 100 + d.kerisFound.length * 10 + d.carsStolen + d.sideJobsDone * 5;
+  return score(da) >= score(db) ? a : b;
+}
+
+/** The newest save among the slots, or null when all are empty. */
+export function newestSaveSlot() {
+  let best = null;
+  let bestTime = '';
+  for (let slot = 1; slot <= SAVE.slots; slot += 1) {
+    const data = readSave(slot);
+    if (data && data.savedAt > bestTime) {
+      bestTime = data.savedAt;
+      best = slot;
+    }
+  }
+  return best;
+}
+
+/** Apply a save record to the live game. */
+export function applySave(game, data) {
+  const p = game.player;
+  p.money = data.money;
+  p.health = data.health;
+  p.armour = data.armour;
+  p.x = data.x;
+  p.z = data.z;
+  p.angle = data.angle;
+  p.camYaw = data.angle + Math.PI;
+  game.weather.hour = data.hour;
+  game.stats.respect = data.respect || 0;
+  game.stats.carsStolen = data.carsStolen || 0;
+  game.stats.sideJobsDone = data.sideJobsDone || 0;
+  game.stats.racesWon = data.racesWon || 0;
+  game.stats.playSeconds = data.playSeconds || 0;
+  game.combat.kills = data.kills || 0;
+  game.stats.kills = data.kills || 0;
+  for (const k of game.world.keris) k.found = (data.kerisFound || []).includes(k.id);
+  game.stats.kerisFound = game.world.keris.filter((k) => k.found).length;
+  game.missions.done = new Set(data.missionsDone || []);
+  game.missions.fromSave({ index: data.missionIndex, stageIndex: data.missionStage, done: data.missionsDone || [] });
+  game.garage.cars = (data.garage || []).map((g) => ({ name: g.name, colour: g.colour, model: null }));
+  game.garage.count = game.garage.cars.length;
+  game.achievements.unlocked = new Set(data.achievements || []);
+}
+
+/** The autosave ticker: writes slot 1's autosave companion every minute. */
+export class Autosave {
+  constructor() {
+    this.timer = SAVE.autosaveSeconds;
+    this.lastWrite = 0;
+  }
+
+  step(dt, game) {
+    this.timer -= dt;
+    if (this.timer <= 0) {
+      this.timer = SAVE.autosaveSeconds;
+      this.lastWrite = game.stats.playSeconds;
+      writeSave(game, 1);
+    }
+  }
 }

@@ -1,583 +1,767 @@
-// render.js — The custom WebGL2 renderer for Tanjung Matahari.
-//
-// No engine, no library: one shader program, one box, one cylinder and one
-// quad, drawn hundreds of times a frame with a different model matrix, colour
-// and texture tile. Building faces come from a small canvas texture atlas
-// (sixteen facades painted at runtime), roads from a repeating asphalt tile
-// with a dashed centre line. Lighting is a single sun direction plus ambient,
-// fogged toward the sky colour; the time of day (day, golden hour, night)
-// just moves the sun and recolours the sky. The camera is a chase camera
-// behind Raka, or behind his car.
+// render.js — The custom WebGL2 engine of Tanjung Matahari.
+// No library, no textures, no assets: one shader, one dynamic vertex
+// buffer, and a box-soup builder that draws the whole city every frame —
+// ground and roads, buildings with lit windows, cars, pedestrians, palms,
+// boats, lamps, the helicopter, rain and the mission beam. Colours are
+// per-vertex; the shader adds a sun lambert term, an ambient term and
+// distance fog from the weather palette. The camera is a standard
+// perspective look-at. Everything the game draws goes through here, so a
+// screenshot is always a true render of the live world.
 
-import { clamp, lerp } from './rng.js';
+import { matPerspective, matLookAt, matMultiply, hexRgb, shade, mixRgb, hash2 } from './math3.js';
+import { WORLD } from './config.js';
+import { paletteForHour, sunDirection, isNight } from './weather.js';
+import { GARAGE_POS } from './garage.js';
 
-// ---------- tiny mat4 helpers (column-major, like WebGL expects) ----------
-
-function mat4Identity() {
-  return new Float32Array([1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1]);
-}
-
-function mat4Multiply(a, b) {
-  const out = new Float32Array(16);
-  for (let c = 0; c < 4; c += 1) {
-    for (let r = 0; r < 4; r += 1) {
-      let sum = 0;
-      for (let k = 0; k < 4; k += 1) sum += a[k * 4 + r] * b[c * 4 + k];
-      out[c * 4 + r] = sum;
-    }
-  }
-  return out;
-}
-
-function mat4Perspective(fovY, aspect, near, far) {
-  const f = 1 / Math.tan(fovY / 2);
-  const out = new Float32Array(16);
-  out[0] = f / aspect;
-  out[5] = f;
-  out[10] = (far + near) / (near - far);
-  out[11] = -1;
-  out[14] = (2 * far * near) / (near - far);
-  return out;
-}
-
-function mat4LookAt(eye, target, up) {
-  let zx = eye[0] - target[0];
-  let zy = eye[1] - target[1];
-  let zz = eye[2] - target[2];
-  let len = Math.hypot(zx, zy, zz) || 1;
-  zx /= len; zy /= len; zz /= len;
-  let xx = up[1] * zz - up[2] * zy;
-  let xy = up[2] * zx - up[0] * zz;
-  let xz = up[0] * zy - up[1] * zx;
-  len = Math.hypot(xx, xy, xz) || 1;
-  xx /= len; xy /= len; xz /= len;
-  const yx = zy * xz - zz * xy;
-  const yy = zz * xx - zx * xz;
-  const yz = zx * xy - zy * xx;
-  const out = new Float32Array(16);
-  out[0] = xx; out[1] = yx; out[2] = zx; out[3] = 0;
-  out[4] = xy; out[5] = yy; out[6] = zy; out[7] = 0;
-  out[8] = xz; out[9] = yz; out[10] = zz; out[11] = 0;
-  out[12] = -(xx * eye[0] + xy * eye[1] + xz * eye[2]);
-  out[13] = -(yx * eye[0] + yy * eye[1] + yz * eye[2]);
-  out[14] = -(zx * eye[0] + zy * eye[1] + zz * eye[2]);
-  out[15] = 1;
-  return out;
-}
-
-/** Model matrix: translate, rotate around Y, scale. */
-function mat4Model(x, y, z, rotY, sx, sy, sz) {
-  const c = Math.cos(rotY);
-  const s = Math.sin(rotY);
-  const out = new Float32Array(16);
-  out[0] = c * sx; out[1] = 0; out[2] = -s * sx; out[3] = 0;
-  out[4] = 0; out[5] = sy; out[6] = 0; out[7] = 0;
-  out[8] = s * sz; out[9] = 0; out[10] = c * sz; out[11] = 0;
-  out[12] = x; out[13] = y; out[14] = z; out[15] = 1;
-  return out;
-}
-
-// ---------- shaders ----------
-
-const VERT_SRC = `#version 300 es
+const VERTEX_SHADER = `#version 300 es
+precision highp float;
 layout(location=0) in vec3 aPos;
 layout(location=1) in vec3 aNormal;
-layout(location=2) in vec2 aUV;
+layout(location=2) in vec3 aColor;
 uniform mat4 uProj;
 uniform mat4 uView;
-uniform mat4 uModel;
-uniform vec4 uTile;
-out vec3 vNormal;
-out vec2 vUV;
-out float vDepth;
-void main() {
-  vec4 world = uModel * vec4(aPos, 1.0);
-  vNormal = mat3(uModel) * aNormal;
-  vUV = aUV * uTile.zw + uTile.xy;
-  vec4 view = uView * world;
-  vDepth = -view.z;
-  gl_Position = uProj * view;
-}`;
-
-const FRAG_SRC = `#version 300 es
-precision mediump float;
-in vec3 vNormal;
-in vec2 vUV;
-in float vDepth;
-uniform vec3 uColor;
 uniform vec3 uSunDir;
-uniform vec3 uSunColor;
-uniform vec3 uAmbient;
+uniform float uAmbient;
 uniform vec3 uFogColor;
 uniform float uFogNear;
 uniform float uFogFar;
-uniform sampler2D uTex;
-uniform int uUseTex;
-uniform float uEmissive;
-out vec4 fragColor;
+out vec3 vColor;
+out float vFog;
 void main() {
-  vec3 n = normalize(vNormal);
-  float diff = max(dot(n, normalize(uSunDir)), 0.0);
-  vec3 tex = uUseTex == 1 ? texture(uTex, vUV).rgb : vec3(1.0);
-  vec3 lit = (uAmbient + uSunColor * diff) * uColor * tex;
-  lit += uColor * uEmissive;
-  float fog = clamp((vDepth - uFogNear) / (uFogFar - uFogNear), 0.0, 1.0);
-  fragColor = vec4(mix(lit, uFogColor, fog), 1.0);
-}`;
+  vec4 world = vec4(aPos, 1.0);
+  vec4 view = uView * world;
+  gl_Position = uProj * view;
+  float diff = max(dot(normalize(aNormal), normalize(uSunDir)), 0.0);
+  float light = uAmbient + (1.0 - uAmbient) * diff;
+  vColor = aColor * light;
+  float dist = -view.z;
+  vFog = clamp((dist - uFogNear) / (uFogFar - uFogNear), 0.0, 1.0);
+}
+`;
 
-// ---------- texture painting (canvas, at runtime, no files) ----------
+const FRAGMENT_SHADER = `#version 300 es
+precision highp float;
+in vec3 vColor;
+in float vFog;
+uniform vec3 uFogColor;
+out vec4 outColor;
+void main() {
+  vec3 c = mix(vColor, uFogColor, vFog);
+  outColor = vec4(c, 1.0);
+}
+`;
 
-/** Paint the 4x4 facade atlas: each tile is a building face with windows. */
-function paintFacadeAtlas() {
-  const canvas = document.createElement('canvas');
-  canvas.width = 512;
-  canvas.height = 512;
-  const g = canvas.getContext('2d');
-  const bases = [
-    '#d8c49a', '#cfa98f', '#aebfc4', '#e0d3a8', '#bfa8c0', '#a8c4a0',
-    '#e0b08a', '#9fb4d8', '#d8c49a', '#cfa98f', '#aebfc4', '#e0d3a8',
-    '#bfa8c0', '#a8c4a0', '#e0b08a', '#9fb4d8',
-  ];
-  for (let tile = 0; tile < 16; tile += 1) {
-    const tx = (tile % 4) * 128;
-    const ty = Math.floor(tile / 4) * 128;
-    g.fillStyle = bases[tile];
-    g.fillRect(tx, ty, 128, 128);
-    // Window grid, some lit warm.
-    const cols = 4 + (tile % 3);
-    const rows = 6 + (tile % 4);
-    for (let cx = 0; cx < cols; cx += 1) {
-      for (let cy = 0; cy < rows; cy += 1) {
-        const wx = tx + 10 + cx * ((128 - 20) / cols);
-        const wy = ty + 10 + cy * ((128 - 20) / rows);
-        const lit = (cx * 7 + cy * 3 + tile) % 5 === 0;
-        g.fillStyle = lit ? '#ffd98a' : '#2c3a4a';
-        g.fillRect(wx, wy, (128 - 20) / cols - 6, (128 - 20) / rows - 6);
-      }
-    }
-    // Ground-floor shopfront strip.
-    g.fillStyle = tile % 2 === 0 ? '#8a4a3a' : '#3a5a7a';
-    g.fillRect(tx, ty + 108, 128, 20);
-    g.fillStyle = '#f5e9c8';
-    g.font = 'bold 11px sans-serif';
-    g.fillText(tile % 2 === 0 ? 'WARUNG' : 'TOKO', tx + 8, ty + 122);
+/** Compile a shader, throwing a readable error on failure. */
+function compileShader(gl, type, src) {
+  const sh = gl.createShader(type);
+  gl.shaderSource(sh, src);
+  gl.compileShader(sh);
+  if (!gl.getShaderParameter(sh, gl.COMPILE_STATUS)) {
+    throw new Error('shader: ' + gl.getShaderInfoLog(sh));
   }
-  return canvas;
+  return sh;
 }
 
-/** Paint the repeating road tile: asphalt with a dashed centre line. */
-function paintRoadTile() {
-  const canvas = document.createElement('canvas');
-  canvas.width = 128;
-  canvas.height = 128;
-  const g = canvas.getContext('2d');
-  g.fillStyle = '#33363c';
-  g.fillRect(0, 0, 128, 128);
-  g.fillStyle = '#3d4046';
-  for (let i = 0; i < 200; i += 1) {
-    g.fillRect(Math.random() * 128, Math.random() * 128, 2, 2);
+/** A growing triangle soup: positions, normals and colours. */
+export class MeshBuilder {
+  constructor() {
+    this.pos = [];
+    this.nor = [];
+    this.col = [];
   }
-  g.fillStyle = '#e8c84a';
-  g.fillRect(60, 8, 8, 44);
-  g.fillRect(60, 72, 8, 44);
-  g.fillStyle = '#e8e8e8';
-  g.fillRect(4, 0, 3, 128);
-  g.fillRect(121, 0, 3, 128);
-  return canvas;
+
+  clear() {
+    this.pos.length = 0;
+    this.nor.length = 0;
+    this.col.length = 0;
+  }
+
+  get triCount() {
+    return this.pos.length / 9;
+  }
+
+  /** Push one triangle (3 corners, one normal, one colour). */
+  tri(a, b, c, n, color) {
+    this.pos.push(a[0], a[1], a[2], b[0], b[1], b[2], c[0], c[1], c[2]);
+    for (let i = 0; i < 3; i += 1) this.nor.push(n[0], n[1], n[2]);
+    for (let i = 0; i < 3; i += 1) this.col.push(color[0], color[1], color[2]);
+  }
+
+  /** Push a quad as two triangles. Corners must wind counter-clockwise. */
+  quad(a, b, c, d, n, color) {
+    this.tri(a, b, c, n, color);
+    this.tri(a, c, d, n, color);
+  }
+
+  /**
+   * Push an axis-aligned box centred at (cx, cy, cz) with size (sx, sy, sz),
+   * optionally rotated about Y by ry. cy is the centre height.
+   */
+  box(cx, cy, cz, sx, sy, sz, color, ry) {
+    const hx = sx / 2;
+    const hy = sy / 2;
+    const hz = sz / 2;
+    const cos = Math.cos(ry || 0);
+    const sin = Math.sin(ry || 0);
+    const rot = (x, z) => [cx + x * cos + z * sin, cz - x * sin + z * cos];
+    const corners = [];
+    for (const [lx, ly, lz] of [
+      [-hx, -hy, -hz], [hx, -hy, -hz], [hx, -hy, hz], [-hx, -hy, hz],
+      [-hx, hy, -hz], [hx, hy, -hz], [hx, hy, hz], [-hx, hy, hz],
+    ]) {
+      const [rx, rz] = rot(lx, lz);
+      corners.push([rx, cy + ly, rz]);
+    }
+    const [b0, b1, b2, b3, t0, t1, t2, t3] = corners;
+    const up = [0, 1, 0];
+    const down = [0, -1, 0];
+    const north = [0, 0, -1];
+    const south = [0, 0, 1];
+    const east = [1, 0, 0];
+    const west = [-1, 0, 0];
+    this.quad(t0, t1, t2, t3, up, color);
+    this.quad(b3, b2, b1, b0, down, color);
+    this.quad(b0, b1, t1, t0, north, shade(color, 0.92));
+    this.quad(b2, b3, t3, t2, south, shade(color, 0.85));
+    this.quad(b1, b2, t2, t1, east, shade(color, 0.78));
+    this.quad(b3, b0, t0, t3, west, shade(color, 0.78));
+  }
+
+  /** A flat quad on the ground at height y (normal up). */
+  groundQuad(x0, z0, x1, z1, y, color) {
+    this.quad([x0, y, z0], [x1, y, z0], [x1, y, z1], [x0, y, z1], [0, 1, 0], color);
+  }
+
+  /** A vertical quad facing +z (a wall, a sign, a window band). */
+  wallQuad(x, y0, z, w, h, color, ry) {
+    const cos = Math.cos(ry || 0);
+    const sin = Math.sin(ry || 0);
+    const hw = w / 2;
+    const pts = [[-hw, y0, 0], [hw, y0, 0], [hw, y0 + h, 0], [-hw, y0 + h, 0]].map(([lx, ly, lz]) => [
+      x + lx * cos + lz * sin, ly, z - lx * sin + lz * cos,
+    ]);
+    this.quad(pts[0], pts[1], pts[2], pts[3], [Math.sin(ry || 0), 0, Math.cos(ry || 0)], color);
+  }
 }
 
-// ---------- geometry ----------
-
-/** A unit box centred on the origin, 1 wide, 1 high, 1 deep, with UVs. */
-function boxGeometry() {
-  // Each face: 4 corners, two triangles (6 vertices), normal + uv.
-  const faces = [
-    { n: [0, 0, 1], c: [[-0.5, -0.5, 0.5], [0.5, -0.5, 0.5], [0.5, 0.5, 0.5], [-0.5, 0.5, 0.5]] },
-    { n: [0, 0, -1], c: [[0.5, -0.5, -0.5], [-0.5, -0.5, -0.5], [-0.5, 0.5, -0.5], [0.5, 0.5, -0.5]] },
-    { n: [1, 0, 0], c: [[0.5, -0.5, 0.5], [0.5, -0.5, -0.5], [0.5, 0.5, -0.5], [0.5, 0.5, 0.5]] },
-    { n: [-1, 0, 0], c: [[-0.5, -0.5, -0.5], [-0.5, -0.5, 0.5], [-0.5, 0.5, 0.5], [-0.5, 0.5, -0.5]] },
-    { n: [0, 1, 0], c: [[-0.5, 0.5, 0.5], [0.5, 0.5, 0.5], [0.5, 0.5, -0.5], [-0.5, 0.5, -0.5]] },
-    { n: [0, -1, 0], c: [[-0.5, -0.5, -0.5], [0.5, -0.5, -0.5], [0.5, -0.5, 0.5], [-0.5, -0.5, 0.5]] },
-  ];
-  const pos = [];
-  const nor = [];
-  const uv = [];
-  const uvs = [[0, 0], [1, 0], [1, 1], [0, 1]];
-  for (const face of faces) {
-    const order = [0, 1, 2, 0, 2, 3];
-    for (const idx of order) {
-      pos.push(...face.c[idx]);
-      nor.push(...face.n);
-      uv.push(...uvs[idx]);
+/** The renderer: owns the GL context, the shader and the frame. */
+export class Renderer {
+  constructor(canvas) {
+    this.canvas = canvas;
+    this.gl = canvas.getContext('webgl2', { antialias: true, preserveDrawingBuffer: false });
+    if (!this.gl) throw new Error('WebGL2 is not available');
+    const gl = this.gl;
+    const vs = compileShader(gl, gl.VERTEX_SHADER, VERTEX_SHADER);
+    const fs = compileShader(gl, gl.FRAGMENT_SHADER, FRAGMENT_SHADER);
+    this.prog = gl.createProgram();
+    gl.attachShader(this.prog, vs);
+    gl.attachShader(this.prog, fs);
+    gl.linkProgram(this.prog);
+    if (!gl.getProgramParameter(this.prog, gl.LINK_STATUS)) {
+      throw new Error('program: ' + gl.getProgramInfoLog(this.prog));
+    }
+    this.uProj = gl.getUniformLocation(this.prog, 'uProj');
+    this.uView = gl.getUniformLocation(this.prog, 'uView');
+    this.uSunDir = gl.getUniformLocation(this.prog, 'uSunDir');
+    this.uAmbient = gl.getUniformLocation(this.prog, 'uAmbient');
+    this.uFogColor = gl.getUniformLocation(this.prog, 'uFogColor');
+    this.uFogNear = gl.getUniformLocation(this.prog, 'uFogNear');
+    this.uFogFar = gl.getUniformLocation(this.prog, 'uFogFar');
+    this.vao = gl.createVertexArray();
+    this.vbo = gl.createBuffer();
+    this.builder = new MeshBuilder();
+    this.proj = new Float32Array(16);
+    this.view = new Float32Array(16);
+    this.time = 0;
+    this.drawnTris = 0;
+    // Stars: fixed positions on the sky dome, from a seeded hash.
+    this.stars = [];
+    for (let i = 0; i < 90; i += 1) {
+      const a = hash2(i, 7) * Math.PI * 2;
+      const r = 380 + hash2(i, 13) * 60;
+      const y = 120 + hash2(i, 29) * 220;
+      this.stars.push({ x: Math.cos(a) * r, y, z: Math.sin(a) * r, s: 1.5 + hash2(i, 41) * 2.5 });
     }
   }
-  return { pos: new Float32Array(pos), nor: new Float32Array(nor), uv: new Float32Array(uv), count: 36 };
-}
 
-/** A unit cylinder (radius 0.5, height 1), 14 sides, with UVs. */
-function cylinderGeometry() {
-  const sides = 14;
-  const pos = [];
-  const nor = [];
-  const uv = [];
-  for (let i = 0; i < sides; i += 1) {
-    const a0 = (i / sides) * Math.PI * 2;
-    const a1 = ((i + 1) / sides) * Math.PI * 2;
-    const x0 = Math.cos(a0) * 0.5;
-    const z0 = Math.sin(a0) * 0.5;
-    const x1 = Math.cos(a1) * 0.5;
-    const z1 = Math.sin(a1) * 0.5;
-    const tris = [
-      [[x0, -0.5, z0], [x1, -0.5, z1], [x1, 0.5, z1]],
-      [[x0, -0.5, z0], [x1, 0.5, z1], [x0, 0.5, z0]],
-      [[0, 0.5, 0], [x1, 0.5, z1], [x0, 0.5, z0]],
-      [[0, -0.5, 0], [x0, -0.5, z0], [x1, -0.5, z1]],
-    ];
-    const normals = [
-      [Math.cos(a0), 0, Math.sin(a0)], [Math.cos(a1), 0, Math.sin(a1)], [Math.cos(a1), 0, Math.sin(a1)],
-      [Math.cos(a0), 0, Math.sin(a0)], [Math.cos(a1), 0, Math.sin(a1)], [Math.cos(a0), 0, Math.sin(a0)],
-      [0, 1, 0], [0, 1, 0], [0, 1, 0],
-      [0, -1, 0], [0, -1, 0], [0, -1, 0],
-    ];
-    const uvs = [[i / sides, 0], [(i + 1) / sides, 0], [(i + 1) / sides, 1], [i / sides, 0], [(i + 1) / sides, 1], [i / sides, 1], [0.5, 0.5], [0.5, 0.5], [0.5, 0.5], [0.5, 0.5], [0.5, 0.5], [0.5, 0.5]];
-    let n = 0;
-    for (const tri of tris) {
-      for (const v of tri) {
-        pos.push(...v);
-        nor.push(...normals[n]);
-        uv.push(...uvs[n]);
-        n += 1;
-      }
+  /** Resize the canvas to its display size. */
+  resize() {
+    const w = this.canvas.clientWidth || 1280;
+    const h = this.canvas.clientHeight || 720;
+    if (this.canvas.width !== w || this.canvas.height !== h) {
+      this.canvas.width = w;
+      this.canvas.height = h;
     }
+    this.gl.viewport(0, 0, this.canvas.width, this.canvas.height);
   }
-  return { pos: new Float32Array(pos), nor: new Float32Array(nor), uv: new Float32Array(uv), count: pos.length / 3 };
-}
 
-// ---------- time of day ----------
-
-/** Lighting presets keyed by hour of the game clock. */
-export function lightingForHour(hour) {
-  if (hour >= 6 && hour < 16.5) {
-    return {
-      name: 'day', sky: [0.55, 0.75, 0.92], fog: [0.62, 0.78, 0.92],
-      sunDir: [0.45, 0.75, 0.35], sunColor: [1.0, 0.95, 0.85], ambient: [0.42, 0.45, 0.5],
-      fogNear: 90, fogFar: 620, night: 0,
-    };
-  }
-  if (hour >= 16.5 && hour < 18.75) {
-    return {
-      name: 'golden', sky: [0.98, 0.62, 0.35], fog: [0.98, 0.68, 0.42],
-      sunDir: [0.85, 0.28, 0.2], sunColor: [1.0, 0.62, 0.3], ambient: [0.5, 0.38, 0.3],
-      fogNear: 70, fogFar: 520, night: 0.25,
-    };
-  }
-  return {
-    name: 'night', sky: [0.05, 0.07, 0.16], fog: [0.07, 0.09, 0.2],
-    sunDir: [-0.3, 0.6, -0.4], sunColor: [0.45, 0.55, 0.85], ambient: [0.16, 0.18, 0.26],
-    fogNear: 50, fogFar: 420, night: 1,
-  };
-}
-
-// ---------- the renderer ----------
-
-/** Create the renderer for a canvas. Returns null when WebGL2 is missing. */
-export function createRenderer(canvas) {
-  const gl = canvas.getContext('webgl2', { antialias: false, preserveDrawingBuffer: true });
-  if (!gl) return null;
-
-  function compile(type, src) {
-    const shader = gl.createShader(type);
-    gl.shaderSource(shader, src);
-    gl.compileShader(shader);
-    if (!gl.getShaderParameter(shader, gl.COMPILE_STATUS)) {
-      throw new Error(`shader: ${gl.getShaderInfoLog(shader)}`);
+  /** Upload the builder's triangles and draw them. */
+  flush() {
+    const gl = this.gl;
+    const b = this.builder;
+    const n = b.pos.length / 3;
+    if (n === 0) return;
+    const data = new Float32Array(n * 9);
+    for (let i = 0; i < n; i += 1) {
+      data[i * 9] = b.pos[i * 3];
+      data[i * 9 + 1] = b.pos[i * 3 + 1];
+      data[i * 9 + 2] = b.pos[i * 3 + 2];
+      data[i * 9 + 3] = b.nor[i * 3];
+      data[i * 9 + 4] = b.nor[i * 3 + 1];
+      data[i * 9 + 5] = b.nor[i * 3 + 2];
+      data[i * 9 + 6] = b.col[i * 3];
+      data[i * 9 + 7] = b.col[i * 3 + 1];
+      data[i * 9 + 8] = b.col[i * 3 + 2];
     }
-    return shader;
-  }
-  const program = gl.createProgram();
-  gl.attachShader(program, compile(gl.VERTEX_SHADER, VERT_SRC));
-  gl.attachShader(program, compile(gl.FRAGMENT_SHADER, FRAG_SRC));
-  gl.linkProgram(program);
-  if (!gl.getProgramParameter(program, gl.LINK_STATUS)) {
-    throw new Error(`program: ${gl.getProgramInfoLog(program)}`);
-  }
-  gl.useProgram(program);
-
-  const loc = {
-    proj: gl.getUniformLocation(program, 'uProj'),
-    view: gl.getUniformLocation(program, 'uView'),
-    model: gl.getUniformLocation(program, 'uModel'),
-    tile: gl.getUniformLocation(program, 'uTile'),
-    color: gl.getUniformLocation(program, 'uColor'),
-    sunDir: gl.getUniformLocation(program, 'uSunDir'),
-    sunColor: gl.getUniformLocation(program, 'uSunColor'),
-    ambient: gl.getUniformLocation(program, 'uAmbient'),
-    fogColor: gl.getUniformLocation(program, 'uFogColor'),
-    fogNear: gl.getUniformLocation(program, 'uFogNear'),
-    fogFar: gl.getUniformLocation(program, 'uFogFar'),
-    useTex: gl.getUniformLocation(program, 'uUseTex'),
-    emissive: gl.getUniformLocation(program, 'uEmissive'),
-  };
-
-  function makeTexture(sourceCanvas, repeat) {
-    const tex = gl.createTexture();
-    gl.bindTexture(gl.TEXTURE_2D, tex);
-    gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, sourceCanvas);
-    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, repeat ? gl.REPEAT : gl.CLAMP_TO_EDGE);
-    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, repeat ? gl.REPEAT : gl.CLAMP_TO_EDGE);
-    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
-    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
-    return tex;
-  }
-  const facadeTex = makeTexture(paintFacadeAtlas(), false);
-  const roadTex = makeTexture(paintRoadTile(), true);
-
-  function makeBuffer(geo) {
-    const vao = gl.createVertexArray();
-    gl.bindVertexArray(vao);
-    const buf = gl.createBuffer();
-    gl.bindBuffer(gl.ARRAY_BUFFER, buf);
-    const interleaved = new Float32Array(geo.count * 8);
-    for (let i = 0; i < geo.count; i += 1) {
-      interleaved[i * 8 + 0] = geo.pos[i * 3 + 0];
-      interleaved[i * 8 + 1] = geo.pos[i * 3 + 1];
-      interleaved[i * 8 + 2] = geo.pos[i * 3 + 2];
-      interleaved[i * 8 + 3] = geo.nor[i * 3 + 0];
-      interleaved[i * 8 + 4] = geo.nor[i * 3 + 1];
-      interleaved[i * 8 + 5] = geo.nor[i * 3 + 2];
-      interleaved[i * 8 + 6] = geo.uv[i * 2 + 0];
-      interleaved[i * 8 + 7] = geo.uv[i * 2 + 1];
-    }
-    gl.bufferData(gl.ARRAY_BUFFER, interleaved, gl.STATIC_DRAW);
+    gl.bindVertexArray(this.vao);
+    gl.bindBuffer(gl.ARRAY_BUFFER, this.vbo);
+    gl.bufferData(gl.ARRAY_BUFFER, data, gl.DYNAMIC_DRAW);
     gl.enableVertexAttribArray(0);
-    gl.vertexAttribPointer(0, 3, gl.FLOAT, false, 32, 0);
+    gl.vertexAttribPointer(0, 3, gl.FLOAT, false, 36, 0);
     gl.enableVertexAttribArray(1);
-    gl.vertexAttribPointer(1, 3, gl.FLOAT, false, 32, 12);
+    gl.vertexAttribPointer(1, 3, gl.FLOAT, false, 36, 12);
     gl.enableVertexAttribArray(2);
-    gl.vertexAttribPointer(2, 2, gl.FLOAT, false, 32, 24);
-    return { vao, count: geo.count };
-  }
-  const box = makeBuffer(boxGeometry());
-  const cyl = makeBuffer(cylinderGeometry());
-
-  gl.enable(gl.DEPTH_TEST);
-  gl.enable(gl.CULL_FACE);
-  gl.cullFace(gl.BACK);
-
-  let drawCalls = 0;
-
-  function setTile(tx, ty, tw, th) {
-    gl.uniform4f(loc.tile, tx, ty, tw, th);
+    gl.vertexAttribPointer(2, 3, gl.FLOAT, false, 36, 24);
+    gl.drawArrays(gl.TRIANGLES, 0, n);
+    this.drawnTris += n / 3;
   }
 
-  /** Draw one box. colour is [r,g,b]; tile selects a facade atlas region or null. */
-  function drawBox(x, y, z, rotY, sx, sy, sz, colour, tile, emissive) {
-    gl.bindVertexArray(box.vao);
-    gl.uniformMatrix4fv(loc.model, false, mat4Model(x, y, z, rotY, sx, sy, sz));
-    gl.uniform3f(loc.color, colour[0], colour[1], colour[2]);
-    gl.uniform1f(loc.emissive, emissive || 0);
-    if (tile) {
-      gl.activeTexture(gl.TEXTURE0);
-      gl.bindTexture(gl.TEXTURE_2D, facadeTex);
-      gl.uniform1i(loc.useTex, 1);
-      setTile((tile % 4) * 0.25, Math.floor(tile / 4) * 0.25, 0.25, 0.25);
-    } else {
-      gl.uniform1i(loc.useTex, 0);
-      setTile(0, 0, 1, 1);
-    }
-    gl.drawArrays(gl.TRIANGLES, 0, box.count);
-    drawCalls += 1;
-  }
-
-  /** Draw one cylinder. */
-  function drawCylinder(x, y, z, rotY, radius, height, colour, emissive) {
-    gl.bindVertexArray(cyl.vao);
-    gl.uniformMatrix4fv(loc.model, false, mat4Model(x, y, z, rotY, radius * 2, height, radius * 2));
-    gl.uniform3f(loc.color, colour[0], colour[1], colour[2]);
-    gl.uniform1f(loc.emissive, emissive || 0);
-    gl.uniform1i(loc.useTex, 0);
-    setTile(0, 0, 1, 1);
-    gl.drawArrays(gl.TRIANGLES, 0, cyl.count);
-    drawCalls += 1;
-  }
-
-  /** Draw a flat quad on the ground (a road strip, the sea, the beach). */
-  function drawGround(x, y, z, rotY, w, d, colour, road, repeatX, repeatZ) {
-    gl.bindVertexArray(box.vao);
-    gl.uniformMatrix4fv(loc.model, false, mat4Model(x, y, z, rotY, w, 0.06, d));
-    gl.uniform3f(loc.color, colour[0], colour[1], colour[2]);
-    gl.uniform1f(loc.emissive, 0);
-    if (road) {
-      gl.activeTexture(gl.TEXTURE0);
-      gl.bindTexture(gl.TEXTURE_2D, roadTex);
-      gl.uniform1i(loc.useTex, 1);
-      setTile(0, 0, repeatX || 1, repeatZ || 1);
-    } else {
-      gl.uniform1i(loc.useTex, 0);
-      setTile(0, 0, 1, 1);
-    }
-    gl.drawArrays(gl.TRIANGLES, 0, box.count);
-    drawCalls += 1;
-  }
-
-  /** Draw one car: body, cabin, dark under-tray, and police light bar when needed. */
-  function drawCar(car, time) {
-    const def = car.def;
-    const L = def.length;
-    const W = def.width;
-    const H = def.height;
-    drawBox(car.x, H * 0.42, car.z, car.angle, W, H * 0.62, L, car.colour, null, 0);
-    drawBox(car.x, H * 0.85, car.z - Math.sin(car.angle) * L * 0.04, car.angle, W * 0.82, H * 0.5, L * 0.52, [0.12, 0.14, 0.18], null, 0);
-    drawBox(car.x, 0.22, car.z, car.angle, W * 1.04, 0.44, L * 0.96, [0.08, 0.08, 0.09], null, 0);
-    if (car.defId === 'police') {
-      const phase = Math.sin(time * 6 + (car.lightPhase || 0) * 6) > 0;
-      const barColour = phase ? [1, 0.15, 0.15] : [0.15, 0.4, 1];
-      drawBox(car.x, H * 1.12, car.z, car.angle, W * 0.5, 0.18, 0.5, barColour, null, 0.9);
-    }
-    if (car.defId === 'taxi') {
-      drawBox(car.x, H * 1.1, car.z, car.angle, W * 0.4, 0.16, 0.5, [0.1, 0.1, 0.1], null, 0.4);
-    }
-  }
-
-  /** Draw one pedestrian: shirt body and a head. */
-  function drawPed(ped, time) {
-    const bob = Math.sin(time * 6 + ped.x) * 0.05;
-    drawBox(ped.x, 0.85 + bob, ped.z, ped.angle, 0.62, 1.1, 0.4, ped.shirt, null, 0);
-    drawBox(ped.x, 1.62 + bob, ped.z, ped.angle, 0.42, 0.42, 0.4, ped.skin, null, 0);
-  }
-
-  /** The small yellow diamond mission marker, floating and bobbing. */
-  function drawMarker(x, z, time) {
-    const y = 3.2 + Math.sin(time * 2.2) * 0.5;
-    drawBox(x, y, z, time * 1.2, 1.1, 1.6, 1.1, [1.0, 0.85, 0.1], null, 0.85);
-    drawBox(x, 0.25, z, 0, 2.2, 0.12, 2.2, [1.0, 0.85, 0.1], null, 0.5);
-  }
-
-  /** Draw the whole scene for one frame. */
-  function draw(game, camera, hour, time) {
-    const light = lightingForHour(hour);
-    const w = canvas.width;
-    const h = canvas.height;
-    gl.viewport(0, 0, w, h);
-    gl.clearColor(light.sky[0], light.sky[1], light.sky[2], 1);
+  /** Render one frame of the live game. */
+  render(game, eye, target, dt) {
+    const gl = this.gl;
+    this.time += dt;
+    this.resize();
+    const b = this.builder;
+    b.clear();
+    this.drawnTris = 0;
+    const pal = game.weather.palette();
+    const night = game.weather.night;
+    const sunDir = sunDirection(game.weather.hour);
+    gl.clearColor(pal.top[0], pal.top[1], pal.top[2], 1);
     gl.clear(gl.COLOR_BUFFER_BIT | gl.DEPTH_BUFFER_BIT);
-    const proj = mat4Perspective((62 * Math.PI) / 180, w / h, 0.5, 1200);
-    const view = mat4LookAt(
-      [camera.x, camera.y, camera.z],
-      [camera.tx, camera.ty, camera.tz],
-      [0, 1, 0],
-    );
-    gl.uniformMatrix4fv(loc.proj, false, proj);
-    gl.uniformMatrix4fv(loc.view, false, view);
-    gl.uniform3f(loc.sunDir, light.sunDir[0], light.sunDir[1], light.sunDir[2]);
-    gl.uniform3f(loc.sunColor, light.sunColor[0], light.sunColor[1], light.sunColor[2]);
-    gl.uniform3f(loc.ambient, light.ambient[0], light.ambient[1], light.ambient[2]);
-    gl.uniform3f(loc.fogColor, light.fog[0], light.fog[1], light.fog[2]);
-    gl.uniform1f(loc.fogNear, light.fogNear);
-    gl.uniform1f(loc.fogFar, light.fogFar);
-    drawCalls = 0;
+    gl.enable(gl.DEPTH_TEST);
+    gl.disable(gl.CULL_FACE);
+    gl.useProgram(this.prog);
+    matPerspective(this.proj, 1.15, this.canvas.width / this.canvas.height, 0.5, 900);
+    matLookAt(this.view, eye, target, [0, 1, 0]);
+    gl.uniformMatrix4fv(this.uProj, false, this.proj);
+    gl.uniformMatrix4fv(this.uView, false, this.view);
+    gl.uniform3fv(this.uSunDir, sunDir);
+    gl.uniform1f(this.uAmbient, pal.ambient);
+    gl.uniform3fv(this.uFogColor, pal.fog);
+    const fog = game.weather.fogRange();
+    gl.uniform1f(this.uFogNear, fog.near);
+    gl.uniform1f(this.uFogFar, fog.far);
 
-    const world = game.world;
-    // Ground, sea and beach. Each layer sits a little higher than the one
-    // below it, so no two quads ever share a plane and z-fight.
-    drawGround(0, 0.02, 0, 0, 940, 940, [0.42, 0.45, 0.38], false);
-    drawGround(-470, 0.04, 0, 0, 90, 940, [0.16, 0.45, 0.68], false);
-    drawGround(-425, 0.05, 0, 0, 18, 940, [0.88, 0.78, 0.55], false);
-    drawGround(120, 0.06, 430, 0, 700, 70, [0.5, 0.5, 0.48], false);
-    // Roads.
-    for (const a of game.roads.avenues) {
-      drawGround(a.x, 0.08, 0, 0, 14, 900, [1, 1, 1], true, 1, 70);
-    }
-    for (const s of game.roads.streets) {
-      drawGround(0, 0.08, s.z, Math.PI / 2, 14, 900, [1, 1, 1], true, 1, 70);
-    }
-    // Sun disc in the sky, in the sun's direction from the camera.
-    const sunX = camera.x + light.sunDir[0] * 420;
-    const sunY = 120 + light.sunDir[1] * 220;
-    const sunZ = camera.z + light.sunDir[2] * 420;
-    const sunColour = light.name === 'night' ? [0.9, 0.9, 0.75] : [1, 0.75, 0.35];
-    drawBox(sunX, sunY, sunZ, 0, 34, 34, 1, sunColour, null, 1);
-    // Buildings.
-    for (const b of world.buildings) {
-      drawBox(b.x, b.h / 2, b.z, 0, b.w, b.h, b.d, [1, 1, 1], b.tile, light.night * 0.12);
-      drawBox(b.x, b.h + 0.25, b.z, 0, b.w * 0.94, 0.5, b.d * 0.94, b.roof, null, 0);
-      if (b.neon) {
-        drawBox(b.x, Math.min(b.h - 1.5, 8), b.z + b.d / 2 + 0.35, 0, b.w * 0.5, 1.1, 0.3, b.neon, null, 0.9);
-      }
-    }
-    // Pasar Malam stalls with awnings.
-    for (const s of world.stalls) {
-      drawBox(s.x, 1.4, s.z, 0, s.w, 2.8, s.d, [0.55, 0.4, 0.28], null, 0);
-      drawBox(s.x, 3.1, s.z, 0, s.w + 1, 0.25, s.d + 1, s.colour, null, light.night * 0.5);
-    }
-    // Harbour containers.
-    for (const c of world.containers) {
-      drawBox(c.x, c.h / 2, c.z, c.angle, c.w, c.h, c.d, c.colour, null, 0);
-    }
-    // Trees and palms.
-    for (const t of world.trees) {
-      drawCylinder(t.x, t.h / 2, t.z, 0, 0.35, t.h, [0.45, 0.32, 0.2], 0);
-      if (t.palm) {
-        drawBox(t.x, t.h + 0.6, t.z, t.x * 0.1, 4.5, 0.5, 4.5, [0.25, 0.6, 0.25], null, 0);
-      } else {
-        drawBox(t.x, t.h + 1.1, t.z, 0, 3.2, 2.4, 3.2, [0.25, 0.55, 0.28], null, 0);
-      }
-    }
-    // Lighthouse: red-and-white striped tower with a glowing lamp room.
-    const lh = game.landmarks.lighthouse;
-    drawCylinder(lh.x, 14, lh.z, 0, 5, 28, [0.92, 0.92, 0.9], 0);
-    drawCylinder(lh.x, 20, lh.z, 0, 5.4, 3, [0.85, 0.15, 0.15], 0);
-    drawCylinder(lh.x, 8, lh.z, 0, 5.4, 3, [0.85, 0.15, 0.15], 0);
-    drawBox(lh.x, 29.5, lh.z, 0, 4, 3, 4, [1, 0.9, 0.4], null, 0.95);
-    drawBox(lh.x, 31.5, lh.z, 0, 2.4, 1, 2.4, [0.2, 0.2, 0.25], null, 0);
-    // Traffic, parked cars and police.
-    for (const car of world.traffic) drawCar(car, time);
-    for (const car of world.parked) drawCar(car, time);
-    for (const car of world.policeCars) drawCar(car, time);
-    for (const rb of world.roadblocks) {
-      drawBox(rb.x, 0.7, rb.z, rb.angle, 2, 1.4, 4.8, rb.colour, null, 0);
-      drawBox(rb.x, 1.6, rb.z, rb.angle, 1, 0.3, 0.6, [1, 0.15, 0.15], null, 0.9);
-    }
-    // The player's car (drawn on top of the player when driving).
-    if (game.player.car) drawCar(game.player.car, time);
-    // Pedestrians and enemies.
-    for (const ped of world.pedestrians) drawPed(ped, time);
-    for (const e of world.enemies) {
-      if (e.hp <= 0) continue;
-      const bob = Math.sin(time * 5 + e.x) * 0.04;
-      drawBox(e.x, 0.9 + bob, e.z, e.angle, 0.7, 1.2, 0.45, [0.45, 0.12, 0.16], null, 0);
-      drawBox(e.x, 1.7 + bob, e.z, e.angle, 0.45, 0.45, 0.42, e.skin || [0.8, 0.6, 0.45], null, 0);
-    }
-    // Pickups: spinning golden keris crates.
-    for (const pk of game.pickups) {
-      if (pk.taken) continue;
-      drawBox(pk.x, 1.1 + Math.sin(time * 3 + pk.bob) * 0.25, pk.z, time * 1.5, 0.9, 0.9, 0.9, [1, 0.8, 0.15], null, 0.8);
-    }
-    // Collectibles: small golden diamonds around the city.
-    for (const c of world.collectibles) {
-      if (c.taken) continue;
-      drawBox(c.x, 1.0 + Math.sin(time * 2 + c.bob) * 0.3, c.z, time, 0.7, 1.0, 0.7, [1, 0.75, 0.1], null, 0.9);
-    }
-    // Helicopter with a spinning rotor and a spotlight cone glow.
-    if (world.helicopter) {
-      const h = world.helicopter;
-      drawBox(h.x, h.y, h.z, h.angle, 3.2, 2.2, 6.5, [0.25, 0.3, 0.35], null, 0);
-      drawBox(h.x, h.y + 1.4, h.z, h.angle + h.rotor, 10, 0.18, 0.5, [0.15, 0.15, 0.16], null, 0);
-      drawBox(h.x, h.y - 0.5, h.z, h.angle, 1.2, 0.8, 1.2, [1, 0.9, 0.3], null, 0.7);
-    }
-    // Raka on foot.
-    if (game.player.onFoot) {
-      const p = game.player;
-      const bob = p.moving ? Math.sin(time * 9) * 0.06 : 0;
-      drawBox(p.x, 0.95 + bob, p.z, p.angle, 0.66, 1.15, 0.42, [0.15, 0.35, 0.75], null, 0);
-      drawBox(p.x, 1.72 + bob, p.z, p.angle, 0.44, 0.44, 0.42, [0.85, 0.65, 0.5], null, 0);
-      // Raka's red jacket stripe so he reads at a glance.
-      drawBox(p.x, 1.15 + bob, p.z, p.angle, 0.68, 0.22, 0.44, [0.85, 0.1, 0.1], null, 0);
-    }
-    // Mission marker.
-    if (game.marker) drawMarker(game.marker.x, game.marker.z, time);
-    return { drawCalls, light: light.name };
+    const px = game.player.x;
+    const pz = game.player.z;
+    this.drawGround(game, pal, night);
+    this.drawCity(game, pal, night, px, pz);
+    this.drawProps(game, px, pz);
+    this.drawTraffic(game, night);
+    this.drawCrowd(game);
+    this.drawPlayer(game, night);
+    this.drawPolice(game, night);
+    this.drawKeris(game);
+    this.drawAmmo(game);
+    this.drawMarker(game);
+    this.drawRace(game);
+    this.drawBoats(game);
+    this.drawSkyExtras(game, pal);
+    this.drawRain(game, px, pz);
+    this.drawTracers(game);
+    this.drawEffects(game);
+    this.flush();
   }
 
-  return { draw, gl };
+  /** Street props: market stalls, food carts, benches and billboards. */
+  drawProps(game, px, pz) {
+    const b = this.builder;
+    for (const s of game.world.stalls) {
+      const dx = s.x - px;
+      const dz = s.z - pz;
+      if (dx * dx + dz * dz > 200 * 200) continue;
+      const col = hexRgb(s.colour);
+      b.box(s.x, 0.9, s.z, 3.2, 1.8, 2.2, hexRgb('#7a5a3a'), s.angle);
+      b.box(s.x, 2.1, s.z, 3.8, 0.25, 2.8, col, s.angle);
+      b.box(s.x, 1.3, s.z, 2.8, 0.2, 1.8, hexRgb('#e8d8b8'), s.angle);
+    }
+    for (const c of game.world.carts) {
+      const dx = c.x - px;
+      const dz = c.z - pz;
+      if (dx * dx + dz * dz > 200 * 200) continue;
+      b.box(c.x, 0.8, c.z, 1.8, 1.2, 1.2, hexRgb(c.stall.colour), c.angle);
+      b.box(c.x, 1.6, c.z, 2.2, 0.2, 1.6, hexRgb('#e8e8e8'), c.angle);
+      b.box(c.x - 0.7, 0.3, c.z + 0.5, 0.3, 0.6, 0.3, hexRgb('#141414'), c.angle);
+      b.box(c.x + 0.7, 0.3, c.z + 0.5, 0.3, 0.6, 0.3, hexRgb('#141414'), c.angle);
+    }
+    for (const bench of game.world.benches) {
+      const dx = bench.x - px;
+      const dz = bench.z - pz;
+      if (dx * dx + dz * dz > 180 * 180) continue;
+      b.box(bench.x, 0.55, bench.z, 2.2, 0.18, 0.7, hexRgb('#7a5a3a'), bench.angle);
+      b.box(bench.x, 0.9, bench.z - 0.3, 2.2, 0.7, 0.15, hexRgb('#7a5a3a'), bench.angle);
+      b.box(bench.x - 0.9, 0.25, bench.z, 0.15, 0.5, 0.6, hexRgb('#3a3a3a'), bench.angle);
+      b.box(bench.x + 0.9, 0.25, bench.z, 0.15, 0.5, 0.6, hexRgb('#3a3a3a'), bench.angle);
+    }
+    for (const board of game.world.billboards) {
+      const dx = board.x - px;
+      const dz = board.z - pz;
+      if (dx * dx + dz * dz > 260 * 260) continue;
+      b.box(board.x - 4, 4, board.z, 0.5, 8, 0.5, hexRgb('#3a3a3a'), 0);
+      b.box(board.x + 4, 4, board.z, 0.5, 8, 0.5, hexRgb('#3a3a3a'), 0);
+      b.box(board.x, 8.5, board.z, 11, 3.4, 0.4, hexRgb(board.colour), 0);
+      b.box(board.x, 8.5, board.z, 10.2, 0.7, 0.45, hexRgb('#1a1a1a'), 0);
+    }
+  }
+
+  /** Particles and skid marks from the effects system. */
+  drawEffects(game) {
+    const b = this.builder;
+    const fx = game.effects;
+    if (!fx) return;
+    for (const s of fx.skids) {
+      const fade = Math.max(0.25, s.life / 60);
+      const col = [0.08 * fade + 0.02, 0.08 * fade + 0.02, 0.08 * fade + 0.02];
+      b.box(s.x, 0.14, s.z, 0.5, 0.02, s.length, col, s.angle);
+    }
+    for (const p of fx.particles) {
+      const f = p.fade();
+      const col = hexRgb(p.colour);
+      const bright = 0.55 + 0.45 * f;
+      b.box(p.x, p.y, p.z, p.size, p.size, p.size, [col[0] * bright, col[1] * bright, col[2] * bright], 0);
+    }
+  }
+
+  /** Ground: grass, roads with dashes, sidewalks, beach and sea. */
+  drawGround(game, pal, night) {
+    const b = this.builder;
+    const H = WORLD.half;
+    // City grass / concrete base.
+    b.groundQuad(-H, -H, H, WORLD.beachZ - 28, 0, hexRgb('#5a7a4a'));
+    // Beach sand sits slightly below the grass so the beach road's asphalt
+    // (y 0.08) always wins the depth test over it.
+    b.groundQuad(-H, WORLD.beachZ - 28, H, WORLD.beachZ, -0.05, hexRgb('#e8c37a'));
+    // Sea.
+    const seaCol = night ? hexRgb('#0a2438') : hexRgb('#1e6f9a');
+    b.groundQuad(-H, WORLD.beachZ, H, WORLD.beachZ + 60, -0.02, seaCol);
+    // Roads: asphalt strips along every grid line, with sidewalks.
+    const asphalt = hexRgb('#2e2e34');
+    const sidewalk = hexRgb('#9a9a92');
+    const dash = hexRgb('#e8c33c');
+    for (const line of game.worldRoads) {
+      b.groundQuad(-H, line - 7, H, line + 7, 0.08, asphalt);
+      b.groundQuad(line - 7, -H, line + 7, WORLD.beachZ - 28, 0.08, asphalt);
+      b.groundQuad(-H, line - 10, H, line - 7, 0.09, sidewalk);
+      b.groundQuad(-H, line + 7, H, line + 10, 0.09, sidewalk);
+      b.groundQuad(line - 10, -H, line - 7, WORLD.beachZ - 28, 0.09, sidewalk);
+      b.groundQuad(line + 7, -H, line + 10, WORLD.beachZ - 28, 0.09, sidewalk);
+      // Centre dashes.
+      for (let d = -H + 8; d < H; d += 16) {
+        b.groundQuad(d, line - 0.3, d + 5, line + 0.3, 0.12, dash);
+        b.groundQuad(line - 0.3, d, line + 0.3, d + 5, 0.12, dash);
+      }
+    }
+    // Park green in the centre.
+    b.groundQuad(-56, 28, 8, 92, 0.06, hexRgb('#4a7a3a'));
+  }
+
+  /** Buildings, palms, lamps and traffic lights. */
+  drawCity(game, pal, night, px, pz) {
+    const b = this.builder;
+    const winLit = night ? hexRgb('#ffd97a') : hexRgb('#2a3a4a');
+    const winDark = hexRgb('#24303e');
+    for (const bd of game.world.buildings) {
+      const dx = bd.x - px;
+      const dz = bd.z - pz;
+      const d2 = dx * dx + dz * dz;
+      if (d2 > 280 * 280) continue;
+      const col = hexRgb(bd.colour);
+      b.box(bd.x, bd.h / 2, bd.z, bd.w, bd.h, bd.d, col, 0);
+      // Roof cap.
+      b.box(bd.x, bd.h + 0.3, bd.z, bd.w * 0.9, 0.6, bd.d * 0.9, hexRgb(bd.roof), 0);
+      if (bd.kind === 'mosque') {
+        b.box(bd.x - 8, bd.h + 4, bd.z - 6, 3, 8, 3, hexRgb('#f0f0e8'), 0);
+        b.box(bd.x + 8, bd.h + 4, bd.z - 6, 3, 8, 3, hexRgb('#f0f0e8'), 0);
+      }
+      if (bd.kind === 'tower-clock') {
+        b.box(bd.x, bd.h + 3, bd.z, 11, 3, 11, hexRgb('#d8c9a3'), 0);
+      }
+      // Window bands on the two long faces, only when near.
+      if (d2 < 170 * 170) {
+        const floors = Math.max(1, Math.floor(bd.h / 3.4));
+        for (let f = 0; f < floors; f += 1) {
+          const y = 2.2 + f * 3.4;
+          if (y > bd.h - 1) break;
+          const lit = bd.lit && (f % 2 === 0 || night);
+          const wc = lit ? winLit : winDark;
+          b.wallQuad(bd.x, y, bd.z - bd.d / 2 - 0.06, bd.w * 0.7, 1.1, wc, 0);
+          b.wallQuad(bd.x, y, bd.z + bd.d / 2 + 0.06, bd.w * 0.7, 1.1, wc, Math.PI);
+        }
+      }
+    }
+    // Palms: trunk + crossed leaf quads.
+    for (const palm of game.world.palms) {
+      const dx = palm.x - px;
+      const dz = palm.z - pz;
+      if (dx * dx + dz * dz > 220 * 220) continue;
+      b.box(palm.x, palm.h / 2, palm.z, 0.5, palm.h, 0.5, hexRgb('#7a5a3a'), palm.lean);
+      const ly = palm.h + 0.6;
+      const leaf = hexRgb('#2e7a2e');
+      b.box(palm.x, ly, palm.z, 4.4, 0.25, 1.2, leaf, 0.4);
+      b.box(palm.x, ly + 0.2, palm.z, 1.2, 0.25, 4.4, shade(leaf, 0.85), -0.3);
+    }
+    // Street lamps: pole + glowing head at night.
+    for (const lamp of game.world.lamps) {
+      const dx = lamp.x - px;
+      const dz = lamp.z - pz;
+      if (dx * dx + dz * dz > 200 * 200) continue;
+      b.box(lamp.x, 2.8, lamp.z, 0.25, 5.6, 0.25, hexRgb('#3a3a42'), 0);
+      const head = night ? hexRgb('#ffe9a8') : hexRgb('#8a8a7a');
+      b.box(lamp.x, 5.7, lamp.z, 0.9, 0.35, 0.9, head, 0);
+      if (night) b.groundQuad(lamp.x - 3, lamp.z - 3, lamp.x + 3, lamp.z + 3, 0.13, hexRgb('#6a5a30'));
+    }
+    // Traffic lights.
+    for (const light of game.world.lights) {
+      b.box(light.x, 2.4, light.z, 0.3, 4.8, 0.3, hexRgb('#2a2a2a'), 0);
+      const green = light.phase === 0 || light.phase === 2;
+      const red = hexRgb(green ? '#3a1a1a' : '#e81e1e');
+      const grn = hexRgb(green ? '#1ee81e' : '#1a3a1a');
+      b.box(light.x, 4.6, light.z + 0.4, 0.7, 0.7, 0.3, red, 0);
+      b.box(light.x, 3.7, light.z + 0.4, 0.7, 0.7, 0.3, grn, 0);
+    }
+    // Garage yard: a painted rectangle and a sign post.
+    b.groundQuad(GARAGE_POS.x - 12, GARAGE_POS.z - 10, GARAGE_POS.x + 12, GARAGE_POS.z + 10, 0.1, hexRgb('#5a4a3a'));
+    b.box(GARAGE_POS.x - 11, 3, GARAGE_POS.z - 9, 0.3, 6, 0.3, hexRgb('#3a3a42'), 0);
+    b.box(GARAGE_POS.x - 11, 6.2, GARAGE_POS.z - 9, 4, 1.2, 0.2, hexRgb('#e8b73c'), 0);
+  }
+
+  /** Traffic cars, parked cars and the player's stolen car is drawn by drawPlayer. */
+  drawTraffic(game, night) {
+    const b = this.builder;
+    const drawCar = (car, isPolice) => {
+      const col = isPolice ? hexRgb('#e8e8e8') : hexRgb(car.colour);
+      const y = 0.55;
+      const fx0 = Math.sin(car.angle);
+      const fz0 = Math.cos(car.angle);
+      b.box(car.x, y, car.z, 2.1, 0.75, 4.4, col, car.angle);
+      // Cabin sits slightly toward the rear of the car, along its forward axis.
+      b.box(car.x - fx0 * 0.2, y + 0.65, car.z - fz0 * 0.2, 1.8, 0.6, 2.2, hexRgb('#1a2530'), car.angle);
+      const wheel = hexRgb('#141414');
+      const fx = fx0;
+      const fz = fz0;
+      const rx = Math.cos(car.angle);
+      const rz = -Math.sin(car.angle);
+      for (const [along, side] of [[1.5, 1], [1.5, -1], [-1.5, 1], [-1.5, -1]]) {
+        b.box(car.x + fx * along + rx * side * 1.0, 0.35, car.z + fz * along + rz * side * 1.0, 0.35, 0.7, 0.7, wheel, car.angle);
+      }
+      if (isPolice) {
+        b.box(car.x, y + 0.1, car.z, 2.14, 0.3, 4.42, hexRgb('#1e5dc8'), car.angle);
+        const flash = Math.sin(this.time * 8) > 0 ? hexRgb('#e81e1e') : hexRgb('#1e5dc8');
+        b.box(car.x, y + 1.15, car.z - 0.2, 1.2, 0.3, 0.5, flash, car.angle);
+      }
+      if (night) {
+        // Headlight cones on the ground ahead.
+        const hx = car.x + fx * 7;
+        const hz = car.z + fz * 7;
+        b.groundQuad(hx - 2, hz - 3, hx + 2, hz + 3, 0.11, hexRgb('#5a5230'));
+      }
+    };
+    for (const car of game.traffic.cars) {
+      if (car.stolen) continue;
+      drawCar(car, false);
+    }
+    for (const car of game.traffic.parked) {
+      if (car.stolen) continue;
+      drawCar(car, false);
+    }
+    // Race rivals.
+    if (game.races.active) {
+      for (const r of game.races.active.rivals) {
+        drawCar({ x: r.x, z: r.z, angle: r.angle, colour: r.colour }, false);
+      }
+    }
+  }
+
+  /** Pedestrians and guards, with swinging legs. */
+  drawCrowd(game) {
+    const b = this.builder;
+    const px = game.player.x;
+    const pz = game.player.z;
+    for (const p of game.crowd.list) {
+      const dx = p.x - px;
+      const dz = p.z - pz;
+      if (dx * dx + dz * dz > 190 * 190) continue;
+      if (p.state === 'down') {
+        // Lying flat.
+        b.box(p.x, 0.3, p.z, 0.6, 0.5, 1.7, hexRgb(p.shirt), p.angle);
+        b.box(p.x, 0.3, p.z + 1.0, 0.45, 0.45, 0.45, hexRgb(p.skin), p.angle);
+        continue;
+      }
+      if (p.state === 'sit') {
+        // Sitting: torso lower, legs folded forward.
+        b.box(p.x, 0.35, p.z, 0.62, 0.7, 0.4, hexRgb(p.shirt), p.angle);
+        b.box(p.x, 0.85, p.z, 0.42, 0.42, 0.42, hexRgb(p.skin), p.angle);
+        const fx = Math.sin(p.angle);
+        const fz = Math.cos(p.angle);
+        b.box(p.x + fx * 0.5, 0.25, p.z + fz * 0.5, 0.24, 0.4, 0.7, hexRgb(p.pants), p.angle);
+        continue;
+      }
+      const swing = Math.sin(p.walkPhase) * 0.35;
+      const fx = Math.sin(p.angle);
+      const fz = Math.cos(p.angle);
+      const rx = Math.cos(p.angle);
+      const rz = -Math.sin(p.angle);
+      // Legs.
+      b.box(p.x + fx * swing + rx * 0.16, 0.45, p.z + fz * swing + rz * 0.16, 0.24, 0.9, 0.24, hexRgb(p.pants), p.angle);
+      b.box(p.x - fx * swing - rx * 0.16, 0.45, p.z - fz * swing - rz * 0.16, 0.24, 0.9, 0.24, hexRgb(p.pants), p.angle);
+      // Torso + head.
+      b.box(p.x, 1.25, p.z, 0.62, 0.85, 0.4, hexRgb(p.shirt), p.angle);
+      b.box(p.x, 1.95, p.z, 0.42, 0.42, 0.42, hexRgb(p.skin), p.angle);
+      if (p.guard) {
+        b.box(p.x, 2.2, p.z, 0.5, 0.16, 0.5, hexRgb('#0a0a0a'), p.angle);
+        // Guard holds a baton.
+        b.box(p.x + rx * 0.4, 1.3, p.z + rz * 0.4, 0.12, 0.9, 0.12, hexRgb('#3a3a3a'), p.angle);
+      }
+      if (p.state === 'phone') {
+        // A phone glowing in their hand.
+        b.box(p.x + fx * 0.35, 1.35, p.z + fz * 0.35, 0.16, 0.28, 0.06, hexRgb('#9ad8ff'), p.angle);
+      }
+      if (p.state === 'vend') {
+        // Vendors wave a small flag over their stall.
+        b.box(p.x, 2.5 + Math.sin(this.time * 3 + p.id) * 0.15, p.z, 0.7, 0.45, 0.06, hexRgb('#e8b73c'), p.angle);
+      }
+    }
+  }
+
+  /** Raka on foot, or his car when driving. */
+  drawPlayer(game, night) {
+    const b = this.builder;
+    const p = game.player;
+    if (p.car) {
+      const car = p.car;
+      const col = hexRgb(car.colour);
+      const fx0 = Math.sin(car.angle);
+      const fz0 = Math.cos(car.angle);
+      b.box(car.x, 0.55, car.z, 2.1, 0.75, 4.4, col, car.angle);
+      b.box(car.x - fx0 * 0.2, 1.2, car.z - fz0 * 0.2, 1.8, 0.6, 2.2, hexRgb('#1a2530'), car.angle);
+      const wheel = hexRgb('#141414');
+      const fx = fx0;
+      const fz = fz0;
+      const rx = Math.cos(car.angle);
+      const rz = -Math.sin(car.angle);
+      for (const [along, side] of [[1.5, 1], [1.5, -1], [-1.5, 1], [-1.5, -1]]) {
+        b.box(car.x + fx * along + rx * side, 0.35, car.z + fz * along + rz * side, 0.35, 0.7, 0.7, wheel, car.angle);
+      }
+      // Raka's head visible in the cabin + nitro flame.
+      b.box(car.x - fx * 0.3, 1.45, car.z - fz * 0.3, 0.4, 0.4, 0.4, hexRgb('#c89a6a'), car.angle);
+      if (p.nitro && p.nitroFuel > 0 && Math.abs(p.carSpeed) > 5) {
+        const bx = car.x - fx * 2.4;
+        const bz = car.z - fz * 2.4;
+        b.box(bx, 0.5, bz, 0.5, 0.5, 1.2, hexRgb('#3aa8ff'), car.angle);
+      }
+      if (night) {
+        const hx = car.x + fx * 8;
+        const hz = car.z + fz * 8;
+        b.groundQuad(hx - 2.5, hz - 3.5, hx + 2.5, hz + 3.5, 0.11, hexRgb('#6a6238'));
+      }
+      return;
+    }
+    // On foot: yellow jacket, dark trousers, cap.
+    const runSwing = p.running ? Math.sin(this.time * 9) * 0.3 : 0;
+    const fx = Math.sin(p.angle);
+    const fz = Math.cos(p.angle);
+    b.box(p.x - fx * runSwing, 0.45 + p.y, p.z - fz * runSwing, 0.26, 0.9, 0.26, hexRgb('#2a2a3a'), p.angle);
+    b.box(p.x + fx * runSwing, 0.45 + p.y, p.z + fz * runSwing, 0.26, 0.9, 0.26, hexRgb('#2a2a3a'), p.angle);
+    b.box(p.x, 1.3 + p.y, p.z, 0.7, 0.9, 0.45, hexRgb('#e8b73c'), p.angle);
+    b.box(p.x, 2.0 + p.y, p.z, 0.44, 0.44, 0.44, hexRgb('#c89a6a'), p.angle);
+    b.box(p.x, 2.24 + p.y, p.z, 0.5, 0.16, 0.5, hexRgb('#c81e1e'), p.angle);
+    if (game.combat.muzzle > 0) {
+      const mx = p.x + Math.sin(p.angle) * 1.2;
+      const mz = p.z + Math.cos(p.angle) * 1.2;
+      b.box(mx, 1.5 + p.y, mz, 0.5, 0.5, 0.5, hexRgb('#ffe9a8'), p.angle);
+    }
+  }
+
+  /** Police cars, helicopter and roadblocks. */
+  drawPolice(game, night) {
+    const b = this.builder;
+    for (const unit of game.police.units) {
+      const col = hexRgb('#e8e8e8');
+      const ufx = Math.sin(unit.angle);
+      const ufz = Math.cos(unit.angle);
+      b.box(unit.x, 0.55, unit.z, 2.1, 0.75, 4.4, col, unit.angle);
+      b.box(unit.x - ufx * 0.2, 1.2, unit.z - ufz * 0.2, 1.8, 0.6, 2.2, hexRgb('#1a2530'), unit.angle);
+      b.box(unit.x, 0.65, unit.z, 2.14, 0.3, 4.42, hexRgb('#1e5dc8'), unit.angle);
+      const flash = Math.sin(this.time * 9 + unit.x) > 0 ? hexRgb('#e81e1e') : hexRgb('#1e5dc8');
+      b.box(unit.x - ufx * 0.2, 1.7, unit.z - ufz * 0.2, 1.2, 0.3, 0.5, flash, unit.angle);
+    }
+    const heli = game.police.heli;
+    if (heli) {
+      // White police livery with a blue stripe: readable against the sky.
+      b.box(heli.x, heli.y, heli.z, 3.2, 1.6, 5.2, hexRgb('#e8eef4'), 0);
+      b.box(heli.x, heli.y - 0.3, heli.z, 3.24, 0.5, 5.24, hexRgb('#1e5dc8'), 0);
+      b.box(heli.x, heli.y + 0.2, heli.z - 4, 0.8, 0.8, 4.5, hexRgb('#1a2a3a'), 0);
+      const rx = Math.cos(heli.rotor);
+      const rz = Math.sin(heli.rotor);
+      b.box(heli.x + rx * 3.4, heli.y + 1.1, heli.z + rz * 3.4, 7, 0.12, 0.4, hexRgb('#c8c8c8'), heli.rotor);
+      b.box(heli.x, heli.y - 1.2, heli.z, 2.4, 0.3, 1.2, hexRgb('#3a3a3a'), 0);
+      // Red POLISI marking on the side, as a small bright block.
+      b.box(heli.x, heli.y + 0.5, heli.z, 3.3, 0.4, 2.0, hexRgb('#e81e1e'), 0);
+      if (heli.searchlight) {
+        b.groundQuad(heli.x - 4, heli.z - 4, heli.x + 4, heli.z + 4, 0.14, hexRgb('#8a8050'));
+      }
+    }
+    for (const rb of game.police.roadblocks) {
+      b.box(rb.x, 0.55, rb.z, 2.1, 0.75, 4.4, hexRgb('#e8e8e8'), rb.angle);
+      b.box(rb.x + 6, 0.55, rb.z, 2.1, 0.75, 4.4, hexRgb('#e8e8e8'), rb.angle);
+      b.box(rb.x + 3, 1.0, rb.z, 1.0, 1.0, 0.5, hexRgb('#e8b73c'), rb.angle);
+    }
+    for (const strip of game.police.spikes) {
+      if (strip.used) continue;
+      b.box(strip.x, 0.2, strip.z, 3.4, 0.25, 0.5, hexRgb('#1a1a1a'), strip.angle);
+      for (let i = -1; i <= 1; i += 1) {
+        b.box(strip.x + i * 1.1, 0.45, strip.z, 0.25, 0.5, 0.25, hexRgb('#c8c8c8'), strip.angle);
+      }
+    }
+  }
+
+  /** Golden keris collectibles, spinning and glowing. */
+  drawKeris(game) {
+    const b = this.builder;
+    const px = game.player.x;
+    const pz = game.player.z;
+    for (const k of game.world.keris) {
+      if (k.found) continue;
+      const dx = k.x - px;
+      const dz = k.z - pz;
+      if (dx * dx + dz * dz > 200 * 200) continue;
+      const spin = this.time * 1.5 + k.x;
+      b.box(k.x, 1.1, k.z, 0.28, 1.4, 0.28, hexRgb('#ffd94a'), spin);
+      b.box(k.x, 1.1, k.z, 0.9, 0.28, 0.28, hexRgb('#ffd94a'), spin);
+      b.groundQuad(k.x - 1.2, k.z - 1.2, k.x + 1.2, k.z + 1.2, 0.13, hexRgb('#8a7030'));
+    }
+  }
+
+  /** Ammo pickups: small green boxes that bob and glow. */
+  drawAmmo(game) {
+    const b = this.builder;
+    if (!game.ammoPickups) return;
+    const px = game.player.x;
+    const pz = game.player.z;
+    for (const a of game.ammoPickups.list) {
+      if (a.taken) continue;
+      const dx = a.x - px;
+      const dz = a.z - pz;
+      if (dx * dx + dz * dz > 180 * 180) continue;
+      const bob = Math.sin(a.bob) * 0.15;
+      const col = a.kind === 'shotgun' ? hexRgb('#e81e1e') : hexRgb('#2ee86a');
+      b.box(a.x, 0.7 + bob, a.z, 0.7, 0.5, 0.7, col, 0);
+      b.box(a.x, 1.1 + bob, a.z, 0.4, 0.3, 0.4, hexRgb('#e8e8e8'), 0);
+    }
+  }
+
+  /** The mission marker: a tall beam and a floating diamond. */
+  drawMarker(game) {
+    const b = this.builder;
+    const m = game.missions.marker;
+    if (!m) return;
+    const bob = Math.sin(this.time * 2) * 0.4;
+    b.box(m.x, 12, m.z, 1.2, 24, 1.2, hexRgb('#ffe93c'), 0);
+    b.box(m.x, 5 + bob, m.z, 1.4, 1.4, 1.4, hexRgb('#ffd94a'), this.time);
+    b.groundQuad(m.x - 4, m.z - 4, m.x + 4, m.z + 4, 0.13, hexRgb('#8a7030'));
+  }
+
+  /** Race checkpoint gates. */
+  drawRace(game) {
+    const b = this.builder;
+    const race = game.races.active;
+    if (!race) return;
+    const cp = race.nextCheckpoint();
+    if (!cp) return;
+    const [x, z] = cp;
+    const gate = hexRgb('#2ee86a');
+    b.box(x - 5, 3, z, 0.5, 6, 0.5, gate, 0);
+    b.box(x + 5, 3, z, 0.5, 6, 0.5, gate, 0);
+    b.box(x, 5.8, z, 10.5, 0.6, 0.6, gate, 0);
+    b.groundQuad(x - 5, z - 2, x + 5, z + 2, 0.13, hexRgb('#1a5a30'));
+  }
+
+  /** Boats in the harbour and at sea, bobbing. */
+  drawBoats(game) {
+    const b = this.builder;
+    for (const boat of game.world.boats) {
+      const bob = Math.sin(this.time * 0.8 + boat.x) * 0.25;
+      const col = hexRgb(boat.colour);
+      if (boat.kind === 'ferry') {
+        b.box(boat.x, 1.2 + bob, boat.z, 6, 2.4, 14, hexRgb('#e8e8e8'), boat.angle);
+        b.box(boat.x, 3.0 + bob, boat.z, 5, 1.8, 10, col, boat.angle);
+      } else if (boat.kind === 'speed') {
+        b.box(boat.x, 0.9 + bob, boat.z, 2.2, 1.2, 6, col, boat.angle);
+      } else {
+        b.box(boat.x, 1.0 + bob, boat.z, 2.6, 1.4, 7, col, boat.angle);
+        b.box(boat.x, 2.4 + bob, boat.z - 1, 0.25, 3.2, 0.25, hexRgb('#7a5a3a'), boat.angle);
+        b.box(boat.x, 3.4 + bob, boat.z - 1, 0.2, 1.6, 1.8, hexRgb('#e8e8d8'), boat.angle);
+      }
+    }
+  }
+
+  /** Sun disc, moon and drifting clouds. */
+  drawSkyExtras(game, pal) {
+    const b = this.builder;
+    const eye = game.player.cameraEye();
+    const dir = sunDirection(game.weather.hour);
+    const sx = eye[0] + dir[0] * 420;
+    const sy = 60 + dir[1] * 220;
+    const sz = eye[2] + dir[2] * 420;
+    const sunCol = game.weather.night ? hexRgb('#d8d8e8') : pal.sun;
+    // A big flat quad facing the camera, high in the sky.
+    const yaw = Math.atan2(eye[0] - sx, eye[2] - sz);
+    b.wallQuad(sx, sy - 14, sz, 34, 34, sunCol, yaw);
+    // Stars at night, fixed to the world so they never move with the camera.
+    if (game.weather.night) {
+      const twinkle = 0.7 + 0.3 * Math.sin(this.time * 2);
+      for (const st of this.stars) {
+        const sx2 = eye[0] + st.x;
+        const sz2 = eye[2] + st.z;
+        b.box(sx2, st.y, sz2, st.s, st.s, st.s, [0.9 * twinkle, 0.9 * twinkle, 1.0 * twinkle], 0);
+      }
+      // The moon: a pale disc opposite the sun.
+      const mx = eye[0] - dir[0] * 400;
+      const my = 150 + dir[1] * 120;
+      const mz = eye[2] - dir[2] * 400;
+      const myaw = Math.atan2(eye[0] - mx, eye[2] - mz);
+      b.wallQuad(mx, my - 9, mz, 18, 18, hexRgb('#e8e8d8'), myaw);
+    }
+    for (const c of game.weather.clouds) {
+      const cc = game.weather.raining ? hexRgb('#6a6a72') : hexRgb('#f0f0f0');
+      b.box(c.x, 70, c.z, c.s, 2, c.s * 0.5, cc, 0);
+    }
+  }
+
+  /** Rain streaks around the player. */
+  drawRain(game, px, pz) {
+    const b = this.builder;
+    if (game.weather.rainAmount < 0.05) return;
+    const col = hexRgb('#9ab8d8');
+    for (const d of game.weather.drops) {
+      const rx = px + (d.x - px) * 0.4;
+      const rz = pz + (d.z - pz) * 0.4;
+      b.box(rx, d.y, rz, 0.06, 1.4, 0.06, col, 0);
+    }
+  }
+
+  /** Bullet tracers: thin bright boxes along each shot line. */
+  drawTracers(game) {    const b = this.builder;
+    for (const t of game.combat.tracers) {
+      const dx = t.x2 - t.x1;
+      const dz = t.z2 - t.z1;
+      const len = Math.sqrt(dx * dx + dz * dz);
+      if (len < 0.5) continue;
+      const mx = (t.x1 + t.x2) / 2;
+      const mz = (t.z1 + t.z2) / 2;
+      const yaw = Math.atan2(dx, dz);
+      b.box(mx, t.y1, mz, 0.12, 0.12, len, hexRgb('#ffe9a8'), yaw);
+    }
+  }
 }

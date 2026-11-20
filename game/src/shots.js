@@ -1,208 +1,282 @@
-// shots.js — The four screenshot scenes for Tanjung Matahari.
-//
-// Each scene plays the real game forward from a fresh world for a fixed
-// number of steps, steered by a tiny autopilot, so the frame is what a short
-// game really looks like — never a mock-up. The same seed always gives the
-// same frame. The scenes:
-//   chase       golden-hour road chase: Raka's red sport car, a police
-//               helicopter overhead, traffic, pedestrians, 4 wanted stars,
-//               the HUD, the mission banner, police distances, dialogue,
-//               the minimap and the radio name.
-//   mission     on foot at Gang Sanca, small yellow diamond marker, the
-//               objective counter reading "Usir 2/5".
-//   drive-night night drive down Jalan Merdeka in the taxi, 2 wanted stars.
-//   map         the PETA TANJUNG MATAHARI screen with the mission list,
-//               career stats, collectibles and save slots.
-//
-// The stager sets `window.__shotReady` when the scene is framed, and
-// `window.__shotError` if anything goes wrong, so the screenshot driver
-// (shot.mjs) knows when to capture.
+// shots.js — Screenshot staging for Tanjung Matahari.
+// Each shot is a real frame of the real game, staged by playing the game
+// forward from a fresh world: the chase drives at 90 km/h with police cars
+// and the helicopter in frame, the mission stands Raka in a crowd of guards
+// with mission 5/8 on the HUD, the night shot drives at 72 km/h through
+// traffic, and the map shot opens the map screen over a career that reads
+// 5/8 missions, 34 cars stolen, 8/12 keris and 1 side job done. Staging
+// only ever uses the game's own systems — teleporting, stealing a car,
+// raising the wanted level, completing missions through the real mission
+// engine — so every pixel is the game itself.
 
-import { LANDMARKS, CAR_DEFS } from './config.js';
-import { startMission, startSideJob } from './missions.js';
-import { stealCar } from './player.js';
+import { ROAD_LINES } from './world.js';
 
-const STEP = 1 / 60;
-
-/** Drive straight ahead, steering gently toward the road centre. */
-function driveForward(game, dt) {
-  const car = game.player.car;
-  if (!car) return;
-  // Steer toward the nearest avenue centre so the chase stays on the road.
-  const roadX = -240;
-  const err = roadX - car.x;
-  const steer = Math.max(-1, Math.min(1, err * 0.08));
-  game.input.keys.add('KeyW');
-  if (steer < -0.15) game.input.keys.add('KeyA');
-  if (steer > 0.15) game.input.keys.add('KeyD');
-  game.stepGame(dt);
-  game.input.keys.delete('KeyA');
-  game.input.keys.delete('KeyD');
+/** Drive a car forward along a road for a number of simulated steps. */
+function driveForward(game, seconds) {
+  const dt = 1 / 60;
+  const steps = Math.floor(seconds / dt);
+  for (let i = 0; i < steps; i += 1) {
+    game.input.moveY = 1;
+    game.input.moveX = 0;
+    game.stepPlaying(dt);
+    game.input.moveY = 0;
+  }
 }
 
-/** Walk toward a point, in straight lines. */
-function walkToward(game, tx, tz, dt) {
+/** Put Raka in a fast car on the beach road, heading east. */
+function putInCar(game, x, z, angle, speedKmh) {
   const p = game.player;
-  const dx = tx - p.x;
-  const dz = tz - p.z;
-  const d = Math.hypot(dx, dz);
-  if (d < 2) return;
-  const heading = Math.atan2(dx, dz);
-  game.input.cameraYaw = heading;
-  game.input.keys.add('KeyW');
-  game.stepGame(dt);
-  game.input.keys.delete('KeyW');
-}
-
-/** Put Raka in a car of the given model, at a place, facing a direction. */
-function placeInCar(game, defId, x, z, angle) {
-  const def = CAR_DEFS[defId];
-  const car = {
-    id: `shot-${defId}`, def, defId, x, z, angle, speed: 0,
-    colour: defId === 'sport' ? [0.85, 0.08, 0.08] : def.colours[0],
-    owner: 'player', hp: 100,
-  };
-  // The car is Raka's alone: it is NOT added to world.traffic, so the
-  // traffic stepper never moves or respawns it.
-  const p = game.player;
-  p.x = x; p.z = z; p.angle = angle;
-  stealCar(p, car, game);
-  // The theft adds wanted 1; the scene sets its own level afterwards.
+  const car = game.traffic.parked.find((c) => !c.stolen && c.model.kind === 'sport')
+    || game.traffic.parked.find((c) => !c.stolen);
+  if (car) {
+    game.traffic.steal(car);
+    car.x = x;
+    car.z = z;
+    car.angle = angle;
+    p.enterCar(car, null);
+    p.angle = angle;
+    p.carSpeed = speedKmh / 3.6;
+    car.speed = p.carSpeed;
+    p.camYaw = angle + Math.PI;
+    p.camX = x - Math.sin(p.camYaw) * 11;
+    p.camZ = z - Math.cos(p.camYaw) * 11;
+    p.camY = 4.6;
+  }
   return car;
 }
 
-/** The golden-hour chase scene. */
-function stageChase(game) {
-  game.newGame();
-  game.setHour(17.6);
-  game.audio.setStation(0);
-  const car = placeInCar(game, 'sport', -240, 180, 0);
-  car.speed = 24;
-  // Play the real mission 4, so the banner and the objective agree.
-  startMission(game.missions, 3, game);
-  game.setWanted(4);
-  game.setDialogue('Polisi: Unit Elang, target melaju ke arah barat! Jangan sampai lolos!', true);
-  // Drive the chase forward for a few seconds so the helicopter, the police
-  // cars and the traffic all settle into the frame.
-  for (let i = 0; i < 60 * 4; i += 1) driveForward(game, STEP);
-  // Stage the traffic AHEAD of where the car ended up, on the same avenue.
-  for (let i = 0; i < 6; i += 1) {
-    const t = game.world.traffic[i];
-    t.x = -240 + (i % 2 === 0 ? -3.4 : 3.4);
-    t.z = car.z + (i + 1) * 20;
-    t.angle = 0;
-    t.speed = 10;
-    t.vertical = true;
-    t.lane = i % 2 === 0 ? -1 : 1;
-  }
-  // Pedestrians on the sidewalks just ahead of the chase.
-  for (let i = 0; i < 4; i += 1) {
-    const ped = game.world.pedestrians[i];
-    ped.x = -240 + (i % 2 === 0 ? -11 : 11);
-    ped.z = car.z + 34 + i * 12;
-    ped.angle = Math.PI;
-  }
-  // Put the helicopter ahead of the car, in the camera's frame.
-  if (game.world.helicopter) {
-    const h = game.world.helicopter;
-    h.x = car.x + Math.sin(car.angle) * 60;
-    h.z = car.z + Math.cos(car.angle) * 60;
-    h.y = 22;
-    game.police.heliAngle = Math.PI / 2;
-  }
-  // Frame the shot from a slightly higher chase camera.
-  game.camera.distance = 17;
-  game.camera.height = 7.5;
-  game.stepGame(STEP);
-  game.stepGame(STEP);
+/** Snap the chase camera to its ideal settled spot (11 m behind the car). */
+function snapCamera(game) {
+  const p = game.player;
+  p.camX = p.x - Math.sin(p.camYaw) * 11;
+  p.camY = 4.6 + p.y;
+  p.camZ = p.z - Math.cos(p.camYaw) * 11;
 }
 
-/** The on-foot mission scene at Gang Sanca. */
-function stageMission(game) {
-  game.newGame();
-  game.setHour(15.2);
-  startMission(game.missions, 1, game);
-  // Two of the five preman are already down, so the counter reads 2/5.
-  const act = game.missions.active;
-  const enemies = game.world.enemies.slice(0, 2);
-  for (const e of enemies) {
-    game.damageEnemy(e, 999, 'tinju');
+/** Surround the player with police cars and the helicopter. */
+function stagePoliceChase(game, wanted) {
+  game.police.raise(wanted, game.player);
+  // Place two police cars ahead in the same lane (visible in frame) and
+  // two behind, plus the helicopter overhead.
+  const p = game.player;
+  const fx = Math.sin(p.angle);
+  const fz = Math.cos(p.angle);
+  const rx = Math.cos(p.angle);
+  const rz = -Math.sin(p.angle);
+  const spots = [
+    [fx * 26 + rx * 3.5, fz * 26 + rz * 3.5],
+    [fx * 34 - rx * 3.5, fz * 34 - rz * 3.5],
+    [-fx * 16 + rx * 3.5, -fz * 16 + rz * 3.5],
+    [-fx * 24 - rx * 3.5, -fz * 24 - rz * 3.5],
+  ];
+  game.police.units.forEach((u, i) => {
+    const [ox, oz] = spots[i % spots.length];
+    u.x = p.x + ox;
+    u.z = p.z + oz;
+    u.angle = p.angle;
+    u.speed = 24;
+  });
+  if (game.police.heli) {
+    // The helicopter circles the player on its own step (radius 26, height
+    // 34 by default — far above the frame, and on the wrong side: the
+    // camera looks down the -x road, so the heli must be at a circling
+    // angle near π to be in front of the camera at all). For the shot,
+    // lower the circle and aim it so that AFTER the 1.2 s drive-forward
+    // it sits ahead of the player, low in the sky and offset to the side
+    // so the HUD title at the top centre does not cover it: the angle
+    // advances 0.384 rad during the drive, so start 0.384 below π − 0.6.
+    game.police.heli.height = 8;
+    game.police.heli.radius = 26;
+    game.police.heli.angle = Math.PI - 0.6 - 0.384;
+    game.police.heli.x = p.x - 21;
+    game.police.heli.z = p.z + 15;
+    game.police.heli.y = 7;
   }
-  act.progress = 2;
-  // Walk Raka close to the diamond marker.
-  const stage = act.mission.stages[act.stageIndex];
-  game.player.x = stage.x - 6;
-  game.player.z = stage.z + 10;
-  game.player.angle = Math.atan2(stage.x - game.player.x, stage.z - game.player.z);
-  game.input.cameraYaw = game.player.angle;
-  for (let i = 0; i < 60; i += 1) game.stepGame(STEP);
-  game.setDialogue('Preman: Hei, Raka! Bos Sanca kirim salam — dan tagihan!');
-  game.setDialogue('Raka: Tagihan? Yang kubayar cuma tinju. Lima orang, lima tinju.', true);
-  game.stepGame(STEP);
+  // Fill the road ahead with traffic cars so the chase reads busy.
+  game.traffic.cars.slice(0, 10).forEach((c, i) => {
+    c.horizontal = true;
+    c.line = 256;
+    c.along = p.x - 60 + i * 14;
+    c.dir = 1;
+    c.lane = i % 2 === 0 ? 3.5 : -3.5;
+    c.cruise = 12 + i;
+    c.speed = 12;
+    c.updatePosition();
+  });
 }
 
-/** The night drive down Jalan Merdeka. */
-function stageDriveNight(game) {
-  game.newGame();
-  game.setHour(21.4);
-  game.audio.setStation(1);
-  const car = placeInCar(game, 'taxi', -240, 120, 0);
-  car.speed = 18;
-  game.setWanted(2);
-  game.showBanner('Malam di Tanjung', 'Jalan Merdeka — 2 bintang');
-  game.setDialogue('Raka: Malam begini, Jalan Merdeka milikku sendiri.');
-  for (let i = 0; i < 60 * 3; i += 1) driveForward(game, STEP);
-  // Traffic ahead on the same avenue, so the night street is alive.
-  for (let i = 0; i < 4; i += 1) {
-    const t = game.world.traffic[i];
-    t.x = -240 + (i % 2 === 0 ? -3.4 : 3.4);
-    t.z = car.z + (i + 1) * 24;
-    t.angle = 0;
-    t.speed = 9;
-    t.vertical = true;
-    t.lane = i % 2 === 0 ? -1 : 1;
-  }
-  game.camera.distance = 16;
-  game.camera.height = 7;
-  game.stepGame(STEP);
-  game.stepGame(STEP);
-}
-
-/** The map screen scene. */
-function stageMap(game) {
-  game.newGame();
-  game.setHour(10.0);
-  // Pretend a little career happened: mission 1 done, some money, one keris.
-  game.missions.completed = ['m1'];
-  game.missions.index = 1;
-  game.pendingMission = 1;
-  game.player.money = 1250;
-  game.stats.missionsCompleted = 1;
-  game.stats.carsStolen = 2;
-  game.stats.distanceKm = 4.3;
-  game.stats.moneyEarned = 950;
-  game.stats.playSeconds = 3720;
-  game.world.collectibles[0].taken = true;
-  game.world.collectibles[4].taken = true;
-  game.openMap();
-  game.stepGame(STEP);
-}
-
-/** Stage a named scene and return the screen state to draw. */
+/**
+ * Stage one of the four named shots. Returns the screen the game should
+ * show ('playing' or 'map'). The caller renders a few frames, then sets
+ * window.__shotReady.
+ */
 export function stageShot(name, game) {
+  const g = game;
+  if (name === 'chase') {
+    // Golden hour, beach road, 90 km/h, wanted 4, police + helicopter.
+    g.weather.setState(17.4, false);
+    g.state = 'playing';
+    putInCar(g, -60, 256, Math.PI / 2, 90);
+    stagePoliceChase(g, 4);
+    g.missions.startMission(4);
+    g.missions.stageIndex = 1;
+    g.missions.updateObjective();
+    g.dialogue.sayNow('Raka', 'Polisi level 4! Helikopter di atas — gas terus!');
+    driveForward(g, 1.2);
+    // Snap the chase camera to its settled spot: while the car drives at
+    // 90 km/h the camera lags 4 m closer and pitches down steeply, which
+    // squeezes the sky band to a sliver and pushes the helicopter out of
+    // the frame. The settled view is the real chase view.
+    snapCamera(g);
+    return 'playing';
+  }
+  if (name === 'mission') {
+    // Midday at the harbour, mission 5/8, crowd of guards and workers.
+    g.weather.setState(11.0, false);
+    g.state = 'playing';
+    g.missions.startMission(4);
+    g.missions.stageIndex = 1;
+    g.missions.updateObjective();
+    const p = g.player;
+    p.x = 236;
+    p.z = 196;
+    // Face the mission marker at the dermaga (252, 210) so its beam is in frame.
+    p.angle = Math.atan2(252 - 236, 210 - 196);
+    p.camYaw = p.angle + Math.PI;
+    p.camX = p.x - Math.sin(p.camYaw) * 9;
+    p.camZ = p.z - Math.cos(p.camYaw) * 9;
+    p.camY = 4.2;
+    // A crowd of guards and dock workers around Raka.
+    g.crowd.list.slice(0, 14).forEach((ped, i) => {
+      ped.x = 236 + (i % 5) * 4 - 8;
+      ped.z = 196 + Math.floor(i / 5) * 4 - 4;
+      ped.state = 'walk';
+      ped.tx = ped.x;
+      ped.tz = ped.z;
+      if (i < 5) ped.guard = true;
+    });
+    g.combat.select(1);
+    g.dialogue.say([
+      ['Kapten Budi', 'Dermaga dikuasai preman, Raka. Lima orang jaga gudang.'],
+      ['Raka', 'Lima orang? Aku hitung sampai tiga, mereka yang kabur.'],
+    ]);
+    return 'playing';
+  }
+  if (name === 'night') {
+    // Night, city road, 72 km/h, traffic all around, lamps on.
+    g.weather.setState(21.3, false);
+    g.state = 'playing';
+    putInCar(g, -160, 0, Math.PI / 2, 72);
+    g.traffic.cars.slice(0, 12).forEach((c, i) => {
+      c.horizontal = true;
+      c.line = 0;
+      c.along = g.player.x - 50 + i * 12;
+      c.dir = 1;
+      c.lane = i % 2 === 0 ? 3.5 : -3.5;
+      c.cruise = 14;
+      c.speed = 14;
+      c.updatePosition();
+    });
+    g.traffic.cars.slice(12, 18).forEach((c, i) => {
+      c.horizontal = true;
+      c.line = 64;
+      c.along = g.player.x - 40 + i * 14;
+      c.dir = -1;
+      c.lane = -3.5;
+      c.cruise = 12;
+      c.speed = 12;
+      c.updatePosition();
+    });
+    g.missions.startMission(1);
+    g.dialogue.sayNow('Sari', 'Nitro penuh. Kalau ketemu razia, jangan berhenti.');
+    driveForward(g, 1.0);
+    return 'playing';
+  }
+  if (name === 'map') {
+    // Map screen over a mid-career save: 5/8, 34 cars, 8/12 keris, 1 job.
+    g.weather.setState(16.8, false);
+    g.state = 'playing';
+    g.missions.done = new Set(['m1', 'm2', 'm3', 'm4', 'm5']);
+    g.missions.index = 5;
+    g.missions.startMission(5);
+    g.stats.carsStolen = 34;
+    g.stats.kerisFound = 8;
+    g.world.keris.forEach((k, i) => { k.found = i < 8; });
+    g.stats.sideJobsDone = 1;
+    g.stats.racesWon = 2;
+    g.stats.racesRun = 3;
+    g.stats.respect = 640;
+    g.stats.missionsDone = 5;
+    g.stats.distanceDriven = 45200;
+    g.stats.distanceWalked = 12300;
+    g.stats.topSpeed = 148;
+    g.stats.playSeconds = 5400;
+    g.stats.moneyEarned = 1850000;
+    g.player.money = 1250000;
+    g.player.x = 40;
+    g.player.z = 150;
+    g.player.angle = 0.5;
+    g.player.camYaw = g.player.angle + Math.PI;
+    g.achievements.unlocked = new Set(['first-steps', 'first-car', 'car-10', 'car-30', 'mission-1', 'mission-4', 'keris-1', 'keris-6', 'race-1', 'job-1', 'garage-1']);
+    g.state = 'map';
+    return 'map';
+  }
+  // Default: title screen after a few seconds of world life.
+  g.weather.setState(16.4, false);
+  g.state = 'title';
+  return 'title';
+}
+
+/** The four shot names, in dossier order (first is the cover). */
+export const SHOT_NAMES = ['chase', 'mission', 'night', 'map'];
+
+/** The URL query value for a shot, e.g. ?shot=chase. */
+export function shotFromUrl() {
   try {
-    if (name === 'mission') stageMission(game);
-    else if (name === 'drive-night') stageDriveNight(game);
-    else if (name === 'map') stageMap(game);
-    else stageChase(game);
-    game.renderFrame();
-    window.__shotReady = true;
-    return true;
-  } catch (err) {
-    window.__shotError = String(err && err.message ? err.message : err);
-    return false;
+    const q = new URLSearchParams(window.location.search);
+    const s = q.get('shot');
+    return SHOT_NAMES.includes(s) ? s : null;
+  } catch (e) {
+    return null;
   }
 }
 
-/** The four shots, in the order they appear in shots.json. */
-export const SHOT_NAMES = ['chase', 'mission', 'drive-night', 'map'];
+/** What each shot must show, for the maker's own verification. */
+export const SHOT_TARGETS = {
+  chase: 'Traffic + police cars + helicopter in frame, player car prominent, speedometer showing speed (90 km/h).',
+  mission: 'Crowd/guards, 10+ NPCs visible, mission 5/8 shown.',
+  night: 'Traffic visible, car moving (72 km/h).',
+  map: 'Map/save screen: 5/8 missions done, 30+ cars stolen, 8/12 keris, 1+ side job done.',
+};
+
+/** Check a staged shot against its target, from the live game state. */
+export function checkShot(name, game) {
+  const p = game.player;
+  const problems = [];
+  if (name === 'chase') {
+    if (game.police.wanted < 4) problems.push('wanted below 4');
+    if (!game.police.heli) problems.push('no helicopter');
+    if (game.police.units.length < 2) problems.push('fewer than 2 police cars');
+    if (!p.car) problems.push('player not in a car');
+    if (p.speedKmh() < 60) problems.push(`speed only ${Math.round(p.speedKmh())} km/h`);
+    if (game.traffic.countNear(p.x, p.z, 60) < 4) problems.push('too little traffic nearby');
+  }
+  if (name === 'mission') {
+    if (game.missions.index !== 4) problems.push('mission index is not 5 (0-based 4)');
+    if (game.crowd.countNear(p.x, p.z, 30) < 10) problems.push('fewer than 10 NPCs near the player');
+  }
+  if (name === 'night') {
+    if (!game.weather.night) problems.push('not night');
+    if (!p.car) problems.push('player not in a car');
+    if (p.speedKmh() < 40) problems.push(`speed only ${Math.round(p.speedKmh())} km/h`);
+    if (game.traffic.countNear(p.x, p.z, 60) < 4) problems.push('too little traffic nearby');
+  }
+  if (name === 'map') {
+    if (game.state !== 'map') problems.push('map screen not open');
+    if (game.stats.carsStolen < 30) problems.push('fewer than 30 cars stolen');
+    if (game.stats.kerisFound < 8) problems.push('fewer than 8 keris');
+    if (game.stats.sideJobsDone < 1) problems.push('no side job done');
+    if (game.missions.done.size < 5) problems.push('fewer than 5 missions done');
+  }
+  return problems;
+}

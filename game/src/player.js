@@ -1,305 +1,266 @@
 // player.js — Raka, on foot and behind the wheel.
-//
-// Raka walks the sidewalks, sprints with Shift, and drives anything with four
-// wheels. Pressing E near a parked or traffic car steals it: the driver (if
-// any) is pulled out, the wanted level rises, and the car becomes Raka's.
-// Combat is fists up close (F), or a pistol / shotgun (click to fire) with
-// real ammo counts. Driving is arcade-simple on purpose: accelerate, brake,
-// steer harder at low speed, handbrake with Space, horn with H. All movement
-// collides with buildings and the sea wall; cars also bounce off each other
-// with a soft push so pile-ups never lock the game.
+// On foot: WASD runs, Shift sprints, Space jumps a little, mouse drag orbits
+// the camera. In a car: W/S throttle and brake/reverse, A/D steering that
+// tightens with speed, Space handbrake, E to steal or leave a car. The car
+// model is arcade, not simulation: it accelerates, grips, drifts a touch on
+// the handbrake and bumps over kerbs, which is what a screenshot chase needs.
+// The camera is a springy chase camera that sits behind the player and
+// swings wide in a turn, so traffic and police stay in frame.
 
-import { WEAPONS, WEAPON_ORDER, CAR_DEFS } from './config.js';
-import { clamp, dist2d, angleDelta } from './rng.js';
-import { hitsBuilding, inSea, isOnRoad } from './world.js';
+import { clamp, angleDiff } from './rng.js';
+import { WORLD } from './config.js';
+import { isSea, clampToWorld, collideBuildings } from './world.js';
+import { clampCarToWorld } from './traffic.js';
 
-const WALK_SPEED = 5.2;
-const SPRINT_SPEED = 8.4;
-const PLAYER_RADIUS = 0.7;
-
-/** Create Raka's live state from a fresh snapshot. */
-export function createPlayer(snapshot) {
-  return {
-    x: snapshot.x, z: snapshot.z, angle: snapshot.angle, speed: 0,
-    health: snapshot.health, armour: snapshot.armour, money: snapshot.money,
-    weapon: snapshot.weapon,
-    ammo: { pistol: snapshot.ammo.pistol, shotgun: snapshot.ammo.shotgun },
-    onFoot: true,
-    car: null,           // the car Raka is driving, or null
-    punchTimer: 0,
-    shootTimer: 0,
-    hurtTimer: 0,
-    dead: false,
-    moving: false,
-    mutterTimer: 14,
-    distanceDriven: 0,
-    carsStolen: 0,
-    onFootDistance: 0,
-  };
-}
-
-/** Try to move a point, sliding along building walls. Returns the new position. */
-export function moveWithCollision(world, x, z, dx, dz, radius) {
-  let nx = x + dx;
-  let nz = z + dz;
-  if (inSea(nx)) nx = x;
-  if (hitsBuilding(world, nx, z, radius)) nx = x;
-  if (hitsBuilding(world, nx, nz, radius)) nz = z;
-  if (inSea(nx)) nx = x;
-  nx = clamp(nx, -425, 425);
-  nz = clamp(nz, -425, 440);
-  return { x: nx, z: nz };
-}
-
-/** On-foot step: WASD relative to the camera heading. */
-export function stepOnFoot(player, world, input, dt) {
-  const sprint = input.keys.has('ShiftLeft') || input.keys.has('ShiftRight');
-  const speed = sprint ? SPRINT_SPEED : WALK_SPEED;
-  let fx = 0;
-  let fz = 0;
-  const heading = input.cameraYaw;
-  const sin = Math.sin(heading);
-  const cos = Math.cos(heading);
-  if (input.keys.has('KeyW')) { fx += sin; fz += cos; }
-  if (input.keys.has('KeyS')) { fx -= sin; fz -= cos; }
-  if (input.keys.has('KeyD')) { fx += cos; fz -= sin; }
-  if (input.keys.has('KeyA')) { fx -= cos; fz += sin; }
-  const len = Math.hypot(fx, fz);
-  player.moving = len > 0.01;
-  if (len > 0.01) {
-    fx /= len;
-    fz /= len;
-    const targetAngle = Math.atan2(fx, fz);
-    player.angle += clamp(angleDelta(player.angle, targetAngle), -9 * dt, 9 * dt);
-    const moved = moveWithCollision(world, player.x, player.z, fx * speed * dt, fz * speed * dt, PLAYER_RADIUS);
-    player.onFootDistance += dist2d(player.x, player.z, moved.x, moved.z);
-    player.x = moved.x;
-    player.z = moved.z;
-    player.speed = speed;
-  } else {
-    player.speed = 0;
+/** The player: Raka, his body and whichever car he is driving. */
+export class Player {
+  constructor(x, z, angle) {
+    this.x = x;
+    this.z = z;
+    this.y = 0;
+    this.angle = angle;
+    this.vx = 0;
+    this.vz = 0;
+    this.speed = 0; // forward speed on foot, m/s
+    this.health = 100;
+    this.armour = 0;
+    this.money = 300000;
+    this.car = null; // the stolen TrafficCar/ParkedCar being driven
+    this.carSpeed = 0; // m/s, signed
+    this.steer = 0;
+    this.onGround = true;
+    this.jumpV = 0;
+    this.running = false;
+    this.sprinting = false;
+    this.nitro = false;
+    this.nitroFuel = 100;
+    this.camYaw = angle + Math.PI;    this.camPitch = 0.32;
+    this.camDist = 9;
+    this.camX = x;
+    this.camY = 6;
+    this.camZ = z;
   }
-  if (player.punchTimer > 0) player.punchTimer -= dt;
-  if (player.shootTimer > 0) player.shootTimer -= dt;
-  if (player.hurtTimer > 0) player.hurtTimer -= dt;
-}
 
-/** Find the nearest stealable car within reach of the player. */
-export function nearestCar(player, cars, maxDist) {
-  let best = null;
-  let bestD = maxDist;
-  for (const car of cars) {
-    if (car.wrecked) continue;
-    const d = dist2d(player.x, player.z, car.x, car.z);
-    if (d < bestD) { best = car; bestD = d; }
+  /** True when Raka is driving a car. */
+  get inCar() {
+    return this.car !== null;
   }
-  return best;
-}
 
-/** Steal a car: pull the driver out if it is traffic, mark the theft. */
-export function stealCar(player, car, game) {
-  if (car.owner === 'traffic') {
-    // The driver jumps out and runs away; the car is Raka's now.
-    game.spawnFleeingDriver(car);
-    game.addWanted(1, 'Mencuri mobil di jalan');
-  } else if (car.owner === 'parked') {
-    game.addWanted(1, 'Mencuri mobil parkir');
+  /** Current speed in km/h for the speedometer. */
+  speedKmh() {
+    if (this.car) return Math.abs(this.carSpeed) * 3.6;
+    return Math.abs(this.speed) * 3.6;
   }
-  car.owner = 'player';
-  player.car = car;
-  player.onFoot = false;
-  player.x = car.x;
-  player.z = car.z;
-  player.angle = car.angle;
-  player.carsStolen += 1;
-  if (game.stats) game.stats.carsStolen += 1;
-  game.setDialogue(`Raka: Mobil ${car.def.name} ini sekarang milikku.`);
-  game.audio.horn();
-  return car;
-}
 
-/** Get out of the car, stepping to the side of it. */
-export function exitCar(player, world) {
-  const car = player.car;
-  if (!car) return;
-  const side = Math.PI / 2;
-  const px = car.x + Math.sin(car.angle + side) * 2.4;
-  const pz = car.z + Math.cos(car.angle + side) * 2.4;
-  const spot = moveWithCollision(world, car.x, car.z, px - car.x, pz - car.z, PLAYER_RADIUS);
-  player.x = spot.x;
-  player.z = spot.z;
-  player.angle = car.angle;
-  player.car = null;
-  player.onFoot = true;
-  player.speed = 0;
-  car.speed = 0;
-}
-
-/** Driving step: W/S accelerate and brake, A/D steer, Space handbrake. */
-export function stepDriving(player, world, input, dt, game) {
-  const car = player.car;
-  if (!car) return;
-  const def = car.def;
-  const forward = input.keys.has('KeyW');
-  const back = input.keys.has('KeyS');
-  const handbrake = input.keys.has('Space');
-  const steerLeft = input.keys.has('KeyA');
-  const steerRight = input.keys.has('KeyD');
-  if (forward) car.speed += def.accel * dt;
-  else if (back) {
-    if (car.speed > 0.5) car.speed -= def.brake * dt;
-    else car.speed -= def.accel * 0.55 * dt;
-  } else {
-    car.speed -= Math.sign(car.speed) * Math.min(Math.abs(car.speed), 6 * dt);
-  }
-  if (handbrake) car.speed -= Math.sign(car.speed) * Math.min(Math.abs(car.speed), 30 * dt);
-  car.speed = clamp(car.speed, -def.topSpeed * 0.4, def.topSpeed);
-  const steerAmount = (steerLeft ? -1 : 0) + (steerRight ? 1 : 0);
-  const steerFactor = clamp(1 - Math.abs(car.speed) / (def.topSpeed * 1.6), 0.35, 1);
-  const turnRate = steerAmount * 1.9 * steerFactor * def.grip * (handbrake ? 1.5 : 1);
-  if (Math.abs(car.speed) > 0.2) {
-    car.angle += turnRate * dt * Math.sign(car.speed);
-  }
-  const dx = Math.sin(car.angle) * car.speed * dt;
-  const dz = Math.cos(car.angle) * car.speed * dt;
-  const moved = moveWithCollision(world, car.x, car.z, dx, dz, def.length / 2);
-  const hitWall = (moved.x === car.x && Math.abs(dx) > 0.01) || (moved.z === car.z && Math.abs(dz) > 0.01);
-  if (hitWall) {
-    if (Math.abs(car.speed) > 12) {
-      game.damagePlayer(0, Math.abs(car.speed) * 0.35, 'Menabrak tembok');
-      game.audio.punch();
+  /** Step on-foot movement from input axes. */
+  stepOnFoot(dt, input, world) {
+    const sprint = input.sprint ? 1.7 : 1;
+    const maxSpeed = 4.2 * sprint;
+    const accel = 22;
+    // Movement is relative to the camera yaw.
+    const fwdX = Math.sin(this.camYaw + Math.PI);
+    const fwdZ = Math.cos(this.camYaw + Math.PI);
+    const rightX = Math.sin(this.camYaw + Math.PI / 2);
+    const rightZ = Math.cos(this.camYaw + Math.PI / 2);
+    const mx = fwdX * input.moveY + rightX * input.moveX;
+    const mz = fwdZ * input.moveY + rightZ * input.moveX;
+    const ml = Math.sqrt(mx * mx + mz * mz) || 1;
+    const wantX = (mx / ml) * maxSpeed * (input.moveX || input.moveY ? 1 : 0);
+    const wantZ = (mz / ml) * maxSpeed * (input.moveX || input.moveY ? 1 : 0);
+    this.vx += (wantX - this.vx) * Math.min(1, accel * dt / maxSpeed + 6 * dt);
+    this.vz += (wantZ - this.vz) * Math.min(1, accel * dt / maxSpeed + 6 * dt);
+    this.x += this.vx * dt;
+    this.z += this.vz * dt;
+    this.speed = Math.sqrt(this.vx * this.vx + this.vz * this.vz);
+    this.running = this.speed > 0.5;
+    this.sprinting = input.sprint && this.running;
+    if (this.running) {
+      const wantAngle = Math.atan2(this.vx, this.vz);
+      let diff = wantAngle - this.angle;
+      while (diff > Math.PI) diff -= Math.PI * 2;
+      while (diff < -Math.PI) diff += Math.PI * 2;
+      this.angle += diff * Math.min(1, 12 * dt);
     }
-    car.speed *= 0.35;
-  }
-  car.x = moved.x;
-  car.z = moved.z;
-  // Soft collision with other cars: push apart, lose a little speed.
-  for (const other of game.allCars()) {
-    if (other === car || other.wrecked) continue;
-    const d = dist2d(car.x, car.z, other.x, other.z);
-    const minD = (def.length + other.def.length) / 2 - 0.6;
-    if (d < minD && d > 0.01) {
-      const push = (minD - d) / 2;
-      const nx = (car.x - other.x) / d;
-      const nz = (car.z - other.z) / d;
-      car.x += nx * push;
-      car.z += nz * push;
-      if (other.owner === 'traffic') {
-        other.x -= nx * push;
-        other.z -= nz * push;
-        other.speed *= 0.5;
-      }
-      if (Math.abs(car.speed) > 9) {
-        game.addWanted(0, '');
-        car.speed *= 0.7;
+    // Jump: a small hop, gravity brings him back.
+    if (input.jump && this.onGround) {
+      this.jumpV = 5.2;
+      this.onGround = false;
+    }
+    if (!this.onGround) {
+      this.jumpV -= 14 * dt;
+      this.y += this.jumpV * dt;
+      if (this.y <= 0) {
+        this.y = 0;
+        this.jumpV = 0;
+        this.onGround = true;
       }
     }
+    // The sea stops him: waist-deep water at the beach edge.
+    if (isSea(this.x, this.z)) {
+      this.x -= this.vx * dt * 1.5;
+      this.z -= this.vz * dt * 1.5;
+    }
+    const c = clampToWorld(this.x, this.z, 8);
+    this.x = c.x;
+    this.z = c.z;
+    // Buildings are solid: slide along their walls instead of through them.
+    if (world && world.buildings) {
+      const col = collideBuildings(world.buildings, this.x, this.z, 0.6);
+      this.x = col.x;
+      this.z = col.z;
+    }
   }
-  player.x = car.x;
-  player.z = car.z;
-  player.angle = car.angle;
-  player.speed = car.speed;
-  player.distanceDriven += Math.abs(car.speed) * dt;
-  if (game.stats) game.stats.distanceKm += (Math.abs(car.speed) * dt) / 1000;
-  if (player.punchTimer > 0) player.punchTimer -= dt;
-  if (player.shootTimer > 0) player.shootTimer -= dt;
-  if (player.hurtTimer > 0) player.hurtTimer -= dt;
-  game.audio.setEngine(Math.abs(car.speed) / def.topSpeed, true);
-}
 
-/** Switch weapon by slot (0 fists, 1 pistol, 2 shotgun). */
-export function selectWeapon(player, slot) {
-  const id = WEAPON_ORDER[slot];
-  if (!id) return false;
-  if (id !== 'fists' && (player.ammo[id] ?? 0) <= 0 && player.weapon !== id) {
+  /** Step driving from input axes. Arcade handling, tuned for feel. */
+  stepDriving(dt, input, garage) {
+    const car = this.car;
+    if (!car) return;
+    const model = car.model;
+    const top = model.top * (this.nitro && this.nitroFuel > 0 ? 1.35 : 1) * (garage ? garage.topMultiplier() : 1);
+    const accel = model.accel * (garage ? garage.accelMultiplier() : 1);
+    const brakePower = garage && garage.brakesUpgraded ? 2.2 : 1.6;
+    let throttle = 0;
+    if (input.moveY > 0) throttle = 1;
+    if (input.moveY < 0) throttle = this.carSpeed > 0.5 ? -brakePower : -0.55; // brake, then reverse
+    this.carSpeed += throttle * accel * dt;
+    // Drag and rolling resistance.
+    this.carSpeed -= this.carSpeed * 0.35 * dt;
+    if (!input.moveY) this.carSpeed -= this.carSpeed * 0.9 * dt;
+    if (input.handbrake) {
+      this.carSpeed -= this.carSpeed * 2.2 * dt;
+    }
+    this.carSpeed = clamp(this.carSpeed, -top * 0.45, top);
+    // Steering: sharper at low speed, gentle at high speed.
+    const steerTarget = -input.moveX * (0.55 + 1.1 / (1 + Math.abs(this.carSpeed) * 0.12));
+    this.steer += (steerTarget - this.steer) * Math.min(1, 8 * dt);
+    const turnRate = this.steer * clamp(Math.abs(this.carSpeed) / 8, 0, 1) * (this.carSpeed >= 0 ? 1 : -1);
+    this.angle += turnRate * dt * (input.handbrake ? 1.6 : 1);
+    const fx = Math.sin(this.angle);
+    const fz = Math.cos(this.angle);
+    this.x += fx * this.carSpeed * dt;
+    this.z += fz * this.carSpeed * dt;
+    car.x = this.x;
+    car.z = this.z;
+    car.angle = this.angle;
+    car.speed = this.carSpeed;
+    // Nitro drains while held, refills slowly.
+    if (this.nitro && this.nitroFuel > 0 && input.moveY > 0) {
+      this.nitroFuel = Math.max(0, this.nitroFuel - 30 * dt);
+    } else {
+      this.nitroFuel = Math.min(100, this.nitroFuel + 4 * dt);
+    }
+    clampCarToWorld(car);
+    this.x = car.x;
+    this.z = car.z;
+  }
+
+  /** Steal the nearest car: become its driver. Returns the car or null. */
+  enterCar(car, stats) {
+    if (!car) return null;
+    this.car = car;
+    this.carSpeed = 0;
+    this.angle = car.angle;
+    this.x = car.x;
+    this.z = car.z;
+    if (stats) stats.carsStolen += 1;
+    return car;
+  }
+
+  /** Leave the car: step out beside it, the car stays where it is. */
+  exitCar() {
+    if (!this.car) return null;
+    const car = this.car;
+    car.speed = 0;
+    this.car = null;
+    this.carSpeed = 0;
+    this.x = car.x + Math.sin(car.angle + Math.PI / 2) * 2.4;
+    this.z = car.z + Math.cos(car.angle + Math.PI / 2) * 2.4;
+    this.vx = 0;
+    this.vz = 0;
+    this.speed = 0;
+    return car;
+  }
+
+  /** Take damage, armour absorbing first. Returns true when Raka goes down. */
+  hurt(damage) {
+    let rest = damage;
+    if (this.armour > 0) {
+      const absorbed = Math.min(this.armour, rest * 0.7);
+      this.armour -= absorbed;
+      rest -= absorbed;
+    }
+    this.health -= rest;
+    this.lastHurtAt = 0;
+    this.damageFlash = 1;
+    if (this.health <= 0) {
+      this.health = 0;
+      return true;
+    }
     return false;
   }
-  player.weapon = id;
-  return true;
-}
 
-/** Cycle to the next weapon that has ammo (Q / weapon wheel). */
-export function cycleWeapon(player) {
-  const current = WEAPON_ORDER.indexOf(player.weapon);
-  for (let i = 1; i <= WEAPON_ORDER.length; i += 1) {
-    const next = WEAPON_ORDER[(current + i) % WEAPON_ORDER.length];
-    if (next === 'fists' || (player.ammo[next] ?? 0) > 0) {
-      player.weapon = next;
-      return next;
+  /** Heal up to full health. */
+  heal(amount) {
+    this.health = Math.min(100, this.health + amount);
+  }
+
+  /**
+   * Regeneration: after 8 seconds without damage, health creeps back at
+   * 2 per second (never above 60 without food or a garage service). The
+   * city is forgiving to a careful driver.
+   */
+  regen(dt) {
+    this.lastHurtAt = (this.lastHurtAt || 0) + dt;
+    this.damageFlash = Math.max(0, (this.damageFlash || 0) - dt * 2);
+    if (this.lastHurtAt > 8 && this.health > 0 && this.health < 60) {
+      this.health = Math.min(60, this.health + 2 * dt);
     }
   }
-  return player.weapon;
-}
 
-/** Find enemies / police in front of the player within a cone. */
-export function targetsInCone(player, targets, range, halfAngle) {
-  const out = [];
-  for (const t of targets) {
-    if (t.hp <= 0) continue;
-    const d = dist2d(player.x, player.z, t.x, t.z);
-    if (d > range) continue;
-    const want = Math.atan2(t.x - player.x, t.z - player.z);
-    if (Math.abs(angleDelta(player.angle, want)) < halfAngle) out.push({ target: t, dist: d });
-  }
-  out.sort((a, b) => a.dist - b.dist);
-  return out;
-}
-
-/** Punch: hits the nearest enemy or pedestrian in front, close range. */
-export function punch(player, game) {
-  if (player.punchTimer > 0) return false;
-  player.punchTimer = 1 / WEAPONS.fists.rate;
-  game.audio.punch();
-  const w = WEAPONS.fists;
-  const hits = targetsInCone(player, game.enemiesAlive(), w.range, 0.9);
-  if (hits.length > 0) {
-    const hit = hits[0].target;
-    game.damageEnemy(hit, w.damage, 'tinju');
+  /** Eat street food: instant health, costs money. */
+  eatFood(cost, healAmount) {
+    if (this.money < cost) return false;
+    this.money -= cost;
+    this.heal(healAmount);
     return true;
   }
-  const peds = targetsInCone(player, game.world.pedestrians.map((p) => ({ ...p, hp: 1 })), w.range, 0.9);
-  if (peds.length > 0) {
-    game.addWanted(1, 'Memukul warga');
-    game.setDialogue('Warga: Tolong! Ada yang menyerang!');
+
+  /** Buy armour from a street vendor (a rare sight, but they exist). */
+  buyArmour(cost) {
+    if (this.money < cost || this.armour >= 100) return false;
+    this.money -= cost;
+    this.armour = Math.min(100, this.armour + 50);
     return true;
   }
-  return false;
-}
 
-/** Shoot the current gun at the nearest target in front. Returns 'hit' | 'miss' | 'empty'. */
-export function shoot(player, game) {
-  const weapon = WEAPONS[player.weapon];
-  if (!weapon || player.weapon === 'fists') return 'empty';
-  if (player.shootTimer > 0) return 'wait';
-  if ((player.ammo[player.weapon] ?? 0) <= 0) {
-    game.setDialogue(`Raka: ${weapon.name} kehabisan peluru!`);
-    return 'empty';
+  /** Step the chase camera toward its ideal spot behind the player. */
+  stepCamera(dt, input) {
+    if (input.lookDX) this.camYaw += input.lookDX * 0.004;
+    if (input.lookDY) this.camPitch = clamp(this.camPitch + input.lookDY * 0.002, 0.08, 0.9);
+    // When moving, the camera settles behind the direction of travel.
+    const movingAngle = this.car ? this.angle : this.angle;
+    const behind = movingAngle + Math.PI;
+    const diff = angleDiff(this.camYaw, behind);
+    const follow = this.car ? 2.2 : 1.4;
+    if (Math.abs(diff) > 0.05) this.camYaw += diff * Math.min(1, follow * dt);
+    const dist = this.car ? 11 : 8.5;
+    const height = this.car ? 4.6 : 3.6;
+    const tx = this.x - Math.sin(this.camYaw) * dist;
+    const ty = height + this.y;
+    const tz = this.z - Math.cos(this.camYaw) * dist;
+    const k = Math.min(1, 6 * dt);
+    this.camX += (tx - this.camX) * k;
+    this.camY += (ty - this.camY) * k;
+    this.camZ += (tz - this.camZ) * k;
+    this.camDist = dist;
   }
-  player.shootTimer = 1 / weapon.rate;
-  player.ammo[player.weapon] -= 1;
-  game.audio.gunshot(player.weapon === 'shotgun');
-  if (game.stats) game.stats.shotsFired += 1;
-  const spread = player.weapon === 'shotgun' ? 0.45 : 0.12;
-  const hits = targetsInCone(player, game.enemiesAlive(), weapon.range, spread + 0.15);
-  if (hits.length > 0) {
-    const hit = hits[0].target;
-    game.damageEnemy(hit, weapon.damage, weapon.name.toLowerCase());
-    game.addWanted(1, 'Menembak di jalan');
-    return 'hit';
+
+  /** Camera eye and target for the renderer. */
+  cameraEye() {
+    return [this.camX, this.camY, this.camZ];
   }
-  // A missed shot still draws attention if police are near.
-  game.addWanted(0, '');
-  return 'miss';
-}
 
-/** Give the player ammo (mission rewards, pickups). */
-export function giveAmmo(player, weaponId, amount) {
-  if (weaponId === 'fists') return;
-  player.ammo[weaponId] = (player.ammo[weaponId] ?? 0) + amount;
-}
-
-/** Heal / armour the player, clamped to 100. */
-export function healPlayer(player, health, armour) {
-  player.health = clamp(player.health + health, 0, 100);
-  player.armour = clamp(player.armour + armour, 0, 100);
+  cameraTarget() {
+    return [this.x, 1.6 + this.y, this.z];
+  }
 }

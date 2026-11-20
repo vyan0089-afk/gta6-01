@@ -1,287 +1,273 @@
-// audio.js — All sound in Tanjung Matahari is synthesised with WebAudio.
-//
-// No audio files, no network: every sound is an oscillator or a noise buffer
-// built at runtime. The radio is a tiny step sequencer: each station has a
-// tempo, a scale and a style, and the sequencer schedules a bass note, a drum
-// hit and a melody note per step. The engine hum follows the car's speed, the
-// mission jingle is a short pentatonic arpeggio, and the horn is a two-tone
-// square blip. Everything is guarded so the game keeps running even when the
-// browser refuses audio (headless Chrome, first load before any gesture).
+// audio.js — Sound for Tanjung Matahari, made entirely with WebAudio.
+// No audio files exist in the game: the three radio stations are sequenced
+// live from their scales (dangdut koplo, city pop, night rock), the engine
+// hums from an oscillator that follows the car's speed, and every effect —
+// gunshots, pickup chimes, sirens, the keris sparkle — is a small synth
+// patch. Everything is guarded: in a headless browser or before the first
+// user gesture the context may not exist, and the game must never crash.
 
 import { RADIO_STATIONS } from './config.js';
 
-/** Convert a MIDI note number to a frequency in Hz. */
-export function midiToFreq(midi) {
+/** Convert a scale degree to a frequency from a base MIDI note. */
+export function noteFreq(baseMidi, scale, degree) {
+  const oct = Math.floor(degree / scale.length);
+  const step = scale[((degree % scale.length) + scale.length) % scale.length];
+  const midi = baseMidi + oct * 12 + step;
   return 440 * Math.pow(2, (midi - 69) / 12);
 }
 
-/** Create the audio system. Call `unlock()` from a user gesture once. */
-export function createAudio() {
-  let ctx = null;
-  let master = null;
-  let radioGain = null;
-  let engineOsc = null;
-  let engineOsc2 = null;
-  let engineGain = null;
-  let noiseBuffer = null;
-  let station = 0;
-  let radioTimer = null;
-  let stepIndex = 0;
-  let muted = false;
-  let unlocked = false;
+/** The audio system: radio sequencer, engine drone and sound effects. */
+export class AudioSystem {
+  constructor() {
+    this.ctx = null;
+    this.station = 0;
+    this.master = null;
+    this.musicGain = null;
+    this.sfxGain = null;
+    this.engineOsc = null;
+    this.engineGain = null;
+    this.engineFilter = null;
+    this.seqStep = 0;
+    this.nextNoteTime = 0;
+    this.enabled = true;
+    this.muted = false;
+    this.jingleTimer = 0;
+    this.onJingle = null; // callback(text) when the DJ speaks
+  }
 
-  function ensureContext() {
-    if (ctx) return ctx;
-    try {
-      const AC = window.AudioContext || window.webkitAudioContext;
-      if (!AC) return null;
-      ctx = new AC();
-      master = ctx.createGain();
-      master.gain.value = 0.5;
-      master.connect(ctx.destination);
-      radioGain = ctx.createGain();
-      radioGain.gain.value = 0.16;
-      radioGain.connect(master);
-      engineGain = ctx.createGain();
-      engineGain.gain.value = 0.0;
-      engineGain.connect(master);
-      engineOsc = ctx.createOscillator();
-      engineOsc.type = 'sawtooth';
-      engineOsc.frequency.value = 55;
-      engineOsc.connect(engineGain);
-      engineOsc.start();
-      engineOsc2 = ctx.createOscillator();
-      engineOsc2.type = 'square';
-      engineOsc2.frequency.value = 110;
-      const g2 = ctx.createGain();
-      g2.gain.value = 0.25;
-      engineOsc2.connect(g2);
-      g2.connect(engineGain);
-      engineOsc2.start();
-      const len = ctx.sampleRate * 0.5;
-      noiseBuffer = ctx.createBuffer(1, len, ctx.sampleRate);
-      const data = noiseBuffer.getChannelData(0);
-      for (let i = 0; i < len; i += 1) data[i] = Math.random() * 2 - 1;
-    } catch (err) {
-      ctx = null;
+  /** Create the context on first user gesture; safe to call repeatedly. */
+  ensure() {
+    if (this.ctx) {
+      if (this.ctx.state === 'suspended') this.ctx.resume().catch(() => {});
+      return true;
     }
-    return ctx;
-  }
-
-  function unlock() {
-    if (unlocked) return;
-    unlocked = true;
-    const c = ensureContext();
-    if (c && c.state === 'suspended') c.resume().catch(() => {});
-    startRadio();
-  }
-
-  function setMuted(value) {
-    muted = value;
-    if (master && ctx) master.gain.setTargetAtTime(value ? 0 : 0.5, ctx.currentTime, 0.05);
-  }
-
-  /** A short filtered noise burst (gunshot, punch, crash). */
-  function burst(duration, filterFreq, volume) {
-    if (!ctx || muted) return;
     try {
-      const src = ctx.createBufferSource();
-      src.buffer = noiseBuffer;
-      const filter = ctx.createBiquadFilter();
-      filter.type = 'lowpass';
-      filter.frequency.value = filterFreq;
-      const gain = ctx.createGain();
-      gain.gain.setValueAtTime(volume, ctx.currentTime);
-      gain.gain.exponentialRampToValueAtTime(0.001, ctx.currentTime + duration);
-      src.connect(filter);
-      filter.connect(gain);
-      gain.connect(master);
-      src.start();
-      src.stop(ctx.currentTime + duration + 0.02);
-    } catch (err) { /* audio is best-effort */ }
-  }
-
-  /** A single oscillator note with a quick attack and a decay. */
-  function note(freq, when, duration, type, volume, dest) {
-    if (!ctx) return;
-    try {
-      const osc = ctx.createOscillator();
-      osc.type = type;
-      osc.frequency.value = freq;
-      const gain = ctx.createGain();
-      gain.gain.setValueAtTime(0.0001, when);
-      gain.gain.exponentialRampToValueAtTime(volume, when + 0.015);
-      gain.gain.exponentialRampToValueAtTime(0.001, when + duration);
-      osc.connect(gain);
-      gain.connect(dest || master);
-      osc.start(when);
-      osc.stop(when + duration + 0.05);
-    } catch (err) { /* audio is best-effort */ }
-  }
-
-  /** One radio step: bass, drum and melody, per the station's style. */
-  function radioStep() {
-    if (!ctx || muted) return;
-    const st = RADIO_STATIONS[station];
-    const stepDur = 60 / st.bpm / 2; // eighth notes
-    const now = ctx.currentTime + 0.02;
-    const scale = st.scale;
-    const root = st.root;
-    const step = stepIndex;
-    // Bass: root on beats 0 and 4, fifth on beat 6 for dangdut bounce.
-    if (step % 4 === 0) {
-      note(midiToFreq(root - 12), now, stepDur * 1.8, 'triangle', 0.5, radioGain);
-    } else if (step % 8 === 6) {
-      note(midiToFreq(root - 5), now, stepDur * 1.4, 'triangle', 0.4, radioGain);
+      const Ctx = window.AudioContext || window.webkitAudioContext;
+      if (!Ctx) return false;
+      this.ctx = new Ctx();
+      this.master = this.ctx.createGain();
+      this.master.gain.value = 0.5;
+      this.master.connect(this.ctx.destination);
+      this.musicGain = this.ctx.createGain();
+      this.musicGain.gain.value = 0.32;
+      this.musicGain.connect(this.master);
+      this.sfxGain = this.ctx.createGain();
+      this.sfxGain.gain.value = 0.6;
+      this.sfxGain.connect(this.master);
+      // Engine drone: a low sawtooth through a low-pass filter.
+      this.engineOsc = this.ctx.createOscillator();
+      this.engineOsc.type = 'sawtooth';
+      this.engineOsc.frequency.value = 50;
+      this.engineFilter = this.ctx.createBiquadFilter();
+      this.engineFilter.type = 'lowpass';
+      this.engineFilter.frequency.value = 320;
+      this.engineGain = this.ctx.createGain();
+      this.engineGain.gain.value = 0;
+      this.engineOsc.connect(this.engineFilter);
+      this.engineFilter.connect(this.engineGain);
+      this.engineGain.connect(this.master);
+      this.engineOsc.start();
+      this.nextNoteTime = this.ctx.currentTime + 0.1;
+      return true;
+    } catch (e) {
+      this.ctx = null;
+      return false;
     }
-    // Drums: a low thump on every beat, a brighter tick on the off-beats.
+  }
+
+  /** The station currently playing. */
+  get stationDef() {
+    return RADIO_STATIONS[this.station];
+  }
+
+  /** Switch to the next station (R key). */
+  nextStation() {
+    this.station = (this.station + 1) % RADIO_STATIONS.length;
+    this.seqStep = 0;
+    return this.station;
+  }
+
+  /** Mute or unmute everything. */
+  setMuted(m) {
+    this.muted = m;
+    if (this.master) this.master.gain.value = m ? 0 : 0.5;
+  }
+
+  /** Schedule one sequencer step: bass, lead and a hat tick. */
+  scheduleStep(time, station, step) {
+    const beat = 60 / station.tempo / 2; // eighth notes
+    const bassNotes = [0, 0, 7, 0, 5, 0, 7, 3];
+    const leadNotes = [0, 2, 4, 2, 7, 4, 2, 0, 5, 7, 9, 7, 4, 2, 0, -2];
+    const bassDeg = bassNotes[step % bassNotes.length];
+    const leadDeg = leadNotes[step % leadNotes.length];
+    this.tone(noteFreq(station.base - 12, station.scale, bassDeg), time, beat * 0.9, 'triangle', 0.5, this.musicGain);
     if (step % 2 === 0) {
-      burst(0.09, 220, 0.35);
-    } else if (st.style === 'dangdut' && step % 4 === 3) {
-      burst(0.06, 900, 0.22);
-    } else if (st.style === 'rock' && step % 2 === 1) {
-      burst(0.05, 1400, 0.18);
+      this.tone(noteFreq(station.base + 12, station.scale, leadDeg), time, beat * 0.7, 'square', 0.16, this.musicGain);
     }
-    // Melody: a wandering line over the scale, denser for rock.
-    const density = st.style === 'rock' ? 0.85 : st.style === 'dangdut' ? 0.7 : 0.55;
-    const roll = ((step * 7919 + 13) % 100) / 100;
-    if (roll < density) {
-      const degree = (step * 5 + Math.floor(step / 4)) % scale.length;
-      const octave = step % 16 < 8 ? 0 : 12;
-      const midi = root + scale[degree] + octave;
-      const wave = st.style === 'rock' ? 'sawtooth' : 'sine';
-      note(midiToFreq(midi), now, stepDur * 1.6, wave, st.style === 'rock' ? 0.10 : 0.16, radioGain);
-    }
-    stepIndex = (stepIndex + 1) % 64;
-  }
-
-  function startRadio() {
-    if (!ctx || radioTimer !== null) return;
-    const st = RADIO_STATIONS[station];
-    const stepMs = (60 / st.bpm / 2) * 1000;
-    radioTimer = window.setInterval(radioStep, stepMs);
-  }
-
-  function stopRadio() {
-    if (radioTimer !== null) {
-      window.clearInterval(radioTimer);
-      radioTimer = null;
+    // Hat: a short noise burst through a high-pass filter.
+    if (this.ctx) {
+      const dur = 0.03;
+      const buf = this.ctx.createBuffer(1, Math.floor(this.ctx.sampleRate * dur), this.ctx.sampleRate);
+      const data = buf.getChannelData(0);
+      for (let i = 0; i < data.length; i += 1) data[i] = (Math.random() * 2 - 1) * (1 - i / data.length);
+      const src = this.ctx.createBufferSource();
+      src.buffer = buf;
+      const hp = this.ctx.createBiquadFilter();
+      hp.type = 'highpass';
+      hp.frequency.value = 6000;
+      const g = this.ctx.createGain();
+      g.gain.value = step % 4 === 0 ? 0.12 : 0.05;
+      src.connect(hp);
+      hp.connect(g);
+      g.connect(this.musicGain);
+      src.start(time);
     }
   }
 
-  /** Switch to the next station, wrapping around. Returns the new index. */
-  function nextStation() {
-    stopRadio();
-    station = (station + 1) % RADIO_STATIONS.length;
-    stepIndex = 0;
-    startRadio();
-    return station;
+  /** A single oscillator tone. */
+  tone(freq, time, dur, type, vol, dest) {
+    if (!this.ctx) return;
+    const osc = this.ctx.createOscillator();
+    osc.type = type;
+    osc.frequency.value = freq;
+    const g = this.ctx.createGain();
+    g.gain.setValueAtTime(0, time);
+    g.gain.linearRampToValueAtTime(vol, time + 0.01);
+    g.gain.exponentialRampToValueAtTime(0.001, time + dur);
+    osc.connect(g);
+    g.connect(dest || this.sfxGain);
+    osc.start(time);
+    osc.stop(time + dur + 0.05);
   }
 
-  /** Set the station directly (used by the shot stager and save loading). */
-  function setStation(index) {
-    stopRadio();
-    station = ((index % RADIO_STATIONS.length) + RADIO_STATIONS.length) % RADIO_STATIONS.length;
-    stepIndex = 0;
-    startRadio();
-    return station;
+  /** Step the sequencer and the engine drone. */
+  step(dt, player, wanted) {
+    if (!this.ctx || this.muted) return;
+    const station = this.stationDef;
+    const beat = 60 / station.tempo / 2;
+    while (this.nextNoteTime < this.ctx.currentTime + 0.15) {
+      this.scheduleStep(this.nextNoteTime, station, this.seqStep);
+      this.seqStep += 1;
+      this.nextNoteTime += beat;
+    }
+    // Engine follows speed; sirens wail when wanted.
+    if (this.engineGain) {
+      const target = player.car ? 0.05 + Math.min(0.16, Math.abs(player.carSpeed) * 0.004) : 0;
+      this.engineGain.gain.setTargetAtTime(target, this.ctx.currentTime, 0.1);
+      this.engineOsc.frequency.setTargetAtTime(45 + Math.abs(player.carSpeed || 0) * 2.4, this.ctx.currentTime, 0.1);
+    }
+    this.jingleTimer -= dt;
+    if (this.jingleTimer <= 0) {
+      this.jingleTimer = 24 + Math.random() * 10;
+      if (this.onJingle) this.onJingle(station.id);
+    }
   }
 
-  /** Follow the car's speed: pitch rises, volume fades in while driving. */
-  function setEngine(speedRatio, driving) {
-    if (!ctx || !engineOsc) return;
-    try {
-      const t = ctx.currentTime;
-      const target = driving ? 0.05 + speedRatio * 0.10 : 0.0;
-      engineGain.gain.setTargetAtTime(target, t, 0.08);
-      engineOsc.frequency.setTargetAtTime(52 + speedRatio * 130, t, 0.05);
-      engineOsc2.frequency.setTargetAtTime(104 + speedRatio * 260, t, 0.05);
-    } catch (err) { /* audio is best-effort */ }
+  /** Play a named sound effect. */
+  playSfx(name) {
+    if (!this.ctx || this.muted) return;
+    const t = this.ctx.currentTime;
+    switch (name) {
+      case 'pistol':
+        this.noiseBurst(t, 0.12, 1800, 0.5);
+        this.tone(180, t, 0.08, 'square', 0.3);
+        break;
+      case 'shotgun':
+        this.noiseBurst(t, 0.28, 900, 0.7);
+        this.tone(90, t, 0.18, 'square', 0.4);
+        break;
+      case 'punch':
+        this.noiseBurst(t, 0.08, 500, 0.4);
+        break;
+      case 'pickup':
+        this.tone(660, t, 0.12, 'sine', 0.35);
+        this.tone(990, t + 0.1, 0.18, 'sine', 0.35);
+        break;
+      case 'keris':
+        this.tone(880, t, 0.2, 'sine', 0.3);
+        this.tone(1320, t + 0.12, 0.3, 'sine', 0.3);
+        this.tone(1760, t + 0.24, 0.4, 'sine', 0.25);
+        break;
+      case 'mission':
+        this.tone(523, t, 0.15, 'triangle', 0.4);
+        this.tone(659, t + 0.14, 0.15, 'triangle', 0.4);
+        this.tone(784, t + 0.28, 0.3, 'triangle', 0.4);
+        break;
+      case 'siren':
+        this.tone(700, t, 0.4, 'sine', 0.12);
+        this.tone(950, t + 0.4, 0.4, 'sine', 0.12);
+        break;
+      case 'click':
+        this.tone(1200, t, 0.05, 'square', 0.15);
+        break;
+      case 'busted':
+        this.tone(220, t, 0.3, 'sawtooth', 0.3);
+        this.tone(165, t + 0.3, 0.5, 'sawtooth', 0.3);
+        break;
+      case 'crash':
+        this.noiseBurst(t, 0.25, 400, 0.6);
+        break;
+      case 'horn':
+        this.tone(370, t, 0.18, 'square', 0.2);
+        this.tone(466, t, 0.18, 'square', 0.15);
+        break;
+      case 'screech':
+        this.noiseBurst(t, 0.4, 2400, 0.25);
+        this.tone(1400, t, 0.35, 'sawtooth', 0.06);
+        break;
+      case 'door':
+        this.noiseBurst(t, 0.1, 300, 0.4);
+        this.tone(120, t, 0.08, 'square', 0.2);
+        break;
+      case 'rain':
+        this.noiseBurst(t, 1.2, 1200, 0.08);
+        break;
+      case 'splash':
+        this.noiseBurst(t, 0.3, 800, 0.3);
+        this.tone(300, t, 0.2, 'sine', 0.15);
+        break;
+      case 'checkpoint':
+        this.tone(784, t, 0.1, 'sine', 0.35);
+        this.tone(1046, t + 0.09, 0.2, 'sine', 0.35);
+        break;
+      case 'wasted':
+        this.tone(196, t, 0.4, 'sawtooth', 0.3);
+        this.tone(147, t + 0.4, 0.4, 'sawtooth', 0.3);
+        this.tone(98, t + 0.8, 0.8, 'sawtooth', 0.3);
+        break;
+      case 'levelup':
+        this.tone(523, t, 0.12, 'triangle', 0.35);
+        this.tone(659, t + 0.11, 0.12, 'triangle', 0.35);
+        this.tone(784, t + 0.22, 0.12, 'triangle', 0.35);
+        this.tone(1046, t + 0.33, 0.3, 'triangle', 0.35);
+        break;
+      case 'thunder':
+        this.noiseBurst(t, 1.4, 120, 0.7);
+        this.tone(55, t, 1.2, 'sine', 0.4);
+        this.tone(40, t + 0.3, 1.0, 'sine', 0.3);
+        break;
+      default:
+        break;
+    }
   }
 
-  /** Two-tone horn: a short square-wave honk. */
-  function horn() {
-    if (!ctx || muted) return;
-    try {
-      const now = ctx.currentTime;
-      note(370, now, 0.28, 'square', 0.16);
-      note(466, now, 0.28, 'square', 0.12);
-    } catch (err) { /* audio is best-effort */ }
+  /** A filtered noise burst (shots, crashes, hats). */
+  noiseBurst(time, dur, cutoff, vol) {
+    if (!this.ctx) return;
+    const len = Math.floor(this.ctx.sampleRate * dur);
+    const buf = this.ctx.createBuffer(1, len, this.ctx.sampleRate);
+    const data = buf.getChannelData(0);
+    for (let i = 0; i < len; i += 1) data[i] = (Math.random() * 2 - 1) * (1 - i / len);
+    const src = this.ctx.createBufferSource();
+    src.buffer = buf;
+    const f = this.ctx.createBiquadFilter();
+    f.type = 'lowpass';
+    f.frequency.value = cutoff;
+    const g = this.ctx.createGain();
+    g.gain.value = vol;
+    src.connect(f);
+    f.connect(g);
+    g.connect(this.sfxGain);
+    src.start(time);
   }
-
-  /** Gunshot: a loud crack plus a low thump. */
-  function gunshot(big) {
-    burst(big ? 0.28 : 0.16, big ? 900 : 1800, big ? 0.7 : 0.5);
-    if (!ctx || muted) return;
-    note(90, ctx.currentTime, 0.12, 'sine', 0.5);
-  }
-
-  /** Punch thud. */
-  function punch() {
-    burst(0.08, 320, 0.4);
-  }
-
-  /** Cash-register style coin chime. */
-  function cash() {
-    if (!ctx || muted) return;
-    const now = ctx.currentTime;
-    note(midiToFreq(88), now, 0.12, 'sine', 0.22);
-    note(midiToFreq(93), now + 0.09, 0.2, 'sine', 0.22);
-  }
-
-  /** Mission-complete jingle: a rising pentatonic arpeggio, twice. */
-  function missionJingle() {
-    if (!ctx || muted) return;
-    const now = ctx.currentTime;
-    const seq = [60, 64, 67, 72, 76, 79, 84];
-    seq.forEach((midi, i) => {
-      note(midiToFreq(midi), now + i * 0.09, 0.3, 'triangle', 0.28);
-    });
-    note(midiToFreq(84), now + 0.68, 0.55, 'triangle', 0.3);
-    note(midiToFreq(79), now + 0.68, 0.55, 'sine', 0.18);
-  }
-
-  /** Mission-failed low descending line. */
-  function failSting() {
-    if (!ctx || muted) return;
-    const now = ctx.currentTime;
-    [55, 51, 48, 43].forEach((midi, i) => {
-      note(midiToFreq(midi), now + i * 0.16, 0.3, 'sawtooth', 0.14);
-    });
-  }
-
-  /** Police siren whoop, one cycle. */
-  function siren() {
-    if (!ctx || muted) return;
-    try {
-      const now = ctx.currentTime;
-      const osc = ctx.createOscillator();
-      osc.type = 'sine';
-      osc.frequency.setValueAtTime(660, now);
-      osc.frequency.linearRampToValueAtTime(880, now + 0.35);
-      osc.frequency.linearRampToValueAtTime(660, now + 0.7);
-      const gain = ctx.createGain();
-      gain.gain.setValueAtTime(0.0001, now);
-      gain.gain.exponentialRampToValueAtTime(0.08, now + 0.05);
-      gain.gain.exponentialRampToValueAtTime(0.001, now + 0.75);
-      osc.connect(gain);
-      gain.connect(master);
-      osc.start(now);
-      osc.stop(now + 0.8);
-    } catch (err) { /* audio is best-effort */ }
-  }
-
-  /** A soft click for menus. */
-  function click() {
-    if (!ctx || muted) return;
-    note(660, ctx.currentTime, 0.06, 'square', 0.08);
-  }
-
-  return {
-    get station() { return station; },
-    get unlocked() { return unlocked; },
-    unlock, setMuted, nextStation, setStation, setEngine,
-    horn, gunshot, punch, cash, missionJingle, failSting, siren, click,
-    startRadio, stopRadio,
-  };
 }
