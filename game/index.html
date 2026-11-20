@@ -3,211 +3,241 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Tanjung Matahari — Open World</title>
+<title>Tanjung Matahari — Open World Crime Game</title>
 <style>
-  :root { color-scheme: dark; }
-  * { box-sizing: border-box; }
-  html, body { margin: 0; height: 100%; overflow: hidden; background: #0b1020; font-family: "Segoe UI", system-ui, sans-serif; color: #f2ede0; }
+  html, body { margin: 0; height: 100%; overflow: hidden; background: #0a0e1a; font-family: 'Segoe UI', system-ui, sans-serif; color: #fff; }
   #game { position: fixed; inset: 0; width: 100%; height: 100%; display: block; touch-action: none; }
   #status { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap; }
-
-  /* ---------- HUD ---------- */
-  #hud { position: fixed; inset: 0; pointer-events: none; z-index: 5; }
-  #hud.dim { opacity: 0.25; }
-  .panel { background: rgba(8, 12, 24, 0.72); border: 1px solid rgba(255, 210, 90, 0.35); border-radius: 10px; backdrop-filter: blur(2px); }
-  #vitals { position: absolute; top: 14px; left: 14px; padding: 10px 14px; min-width: 240px; }
-  #vitals .row { display: flex; align-items: center; gap: 8px; margin: 3px 0; font-size: 14px; }
-  #vitals .label { width: 74px; font-size: 11px; letter-spacing: 1px; color: #ffd25e; font-weight: 700; }
-  .bar { flex: 1; height: 10px; background: #222; border-radius: 5px; overflow: hidden; }
-  .bar > div { height: 100%; border-radius: 5px; }
-  #healthBar { background: linear-gradient(90deg, #37c978, #7be495); width: 100%; }
-  #armourBar { background: linear-gradient(90deg, #3a8cff, #7db4ff); width: 0%; }
-  #healthNum, #armourNum { width: 30px; text-align: right; font-weight: 700; }
-  #money { font-size: 20px; font-weight: 800; color: #7be495; margin-top: 4px; }
-  #respect { font-size: 12px; color: #ffd25e; }
-  #missionStage { font-size: 12px; color: #9fd8ff; }
-
-  #wanted { position: absolute; top: 14px; right: 14px; padding: 10px 14px; text-align: right; min-width: 230px; }
-  #stars { font-size: 26px; letter-spacing: 4px; color: #ffd25e; line-height: 1; }
-  #stars.hot { color: #ff5a4a; text-shadow: 0 0 12px rgba(255, 90, 60, 0.8); }
-  #wantedLabel { font-size: 13px; font-weight: 700; color: #ffb3a0; }
+  .hud { position: fixed; z-index: 5; pointer-events: none; text-shadow: 0 1px 3px rgba(0,0,0,.8); }
+  /* Top-left: health, armour, money, wanted */
+  #topLeft { top: 14px; left: 14px; width: 300px; }
+  .barWrap { background: rgba(0,0,0,.55); border: 1px solid rgba(255,255,255,.25); border-radius: 4px; height: 14px; margin: 3px 0; overflow: hidden; }
+  .barWrap .fill { height: 100%; transition: width .2s; }
+  #healthBar { background: linear-gradient(90deg, #27d34a, #7be36a); }
+  #armourBar { background: linear-gradient(90deg, #2a7ad8, #6ab0f0); }
+  .statLine { font-size: 14px; font-weight: 700; }
+  #money { font-size: 20px; font-weight: 800; color: #7be36a; }
+  #stars { font-size: 24px; color: #ffd94a; letter-spacing: 2px; }
+  #wantedLabel { font-size: 13px; color: #ffb0b0; font-weight: 700; }
+  /* Top-right: clock, street, radio, minimap */
+  #topRight { top: 14px; right: 14px; text-align: right; }
   #clock { font-size: 22px; font-weight: 800; }
-  #street { font-size: 12px; color: #cfe3ff; }
-  #radioName { font-size: 12px; color: #ffd25e; }
-
-  #objective { position: absolute; top: 14px; left: 50%; transform: translateX(-50%); padding: 8px 18px; text-align: center; max-width: 520px; }
-  #objText { font-size: 15px; font-weight: 700; }
-  #objSub { font-size: 11px; color: #b9c4d6; }
-
-  #policeBox { position: absolute; top: 150px; right: 14px; padding: 8px 12px; min-width: 220px; font-size: 12px; }
-  #policeBox .polTitle { font-size: 11px; letter-spacing: 1px; color: #ff9a8a; font-weight: 700; margin-bottom: 4px; }
-  .polRow { display: flex; justify-content: space-between; gap: 12px; padding: 1px 0; }
-
-  #speedBox { position: absolute; right: 16px; bottom: 170px; text-align: right; }
-  #speed { font-size: 30px; font-weight: 800; text-shadow: 0 2px 8px rgba(0,0,0,0.7); }
-  #speedSub { font-size: 11px; color: #cfe3ff; }
-
-  #minimapWrap { position: absolute; left: 14px; bottom: 14px; }
-  #minimap { width: 190px; height: 190px; border: 2px solid rgba(255, 210, 90, 0.6); border-radius: 50%; background: #16241a; display: block; }
-
-  #dialogue { position: absolute; left: 50%; bottom: 24px; transform: translateX(-50%); max-width: 640px; padding: 10px 18px; font-size: 15px; font-style: italic; text-align: center; opacity: 0; transition: opacity 0.3s; }
-  #dialogue.show { opacity: 1; }
-  #prompt { position: absolute; left: 50%; bottom: 96px; transform: translateX(-50%); padding: 7px 16px; font-size: 14px; font-weight: 700; color: #ffd25e; opacity: 0; transition: opacity 0.2s; }
-  #prompt.show { opacity: 1; }
-
-  #banner { position: absolute; top: 22%; left: 50%; transform: translateX(-50%) scale(0.96); text-align: center; opacity: 0; transition: opacity 0.35s, transform 0.35s; pointer-events: none; }
-  #banner.show { opacity: 1; transform: translateX(-50%) scale(1); }
-  #bannerTitle { font-size: 44px; font-weight: 900; letter-spacing: 2px; color: #ffd25e; text-shadow: 0 3px 0 #7a4a00, 0 6px 18px rgba(0,0,0,0.8); }
-  #bannerSub { font-size: 19px; font-weight: 700; color: #fff; text-shadow: 0 2px 10px rgba(0,0,0,0.9); }
-
-  #crimeFlash { position: absolute; top: 120px; left: 50%; transform: translateX(-50%); padding: 6px 14px; font-size: 13px; font-weight: 700; color: #ff8a7a; opacity: 0; transition: opacity 0.2s; }
-  #crimeFlash.show { opacity: 1; }
-
-  #bustBar { position: absolute; top: 160px; left: 50%; transform: translateX(-50%); width: 320px; padding: 8px 12px; display: none; }
-  #bustBar.show { display: block; }
-  #bustBar .bustTitle { font-size: 12px; font-weight: 800; color: #ff8a7a; letter-spacing: 1px; text-align: center; }
-  #bustBar .bar { height: 12px; margin-top: 4px; }
-  #bustFill { background: linear-gradient(90deg, #ff5a4a, #ff9a3a); width: 0%; }
-
-  #wheel { position: absolute; left: 50%; top: 50%; transform: translate(-50%, -50%); display: none; gap: 10px; padding: 14px; }
-  #wheel.show { display: flex; }
-  .wheelSlot { padding: 12px 16px; border-radius: 8px; background: rgba(20, 28, 44, 0.9); border: 1px solid #445; text-align: center; min-width: 110px; }
-  .wheelSlot.sel { border-color: #ffd25e; background: rgba(80, 60, 10, 0.9); }
-  .wheelSlot b { display: block; font-size: 15px; }
-  .wheelSlot span { font-size: 12px; color: #b9c4d6; }
-
-  /* ---------- Screens ---------- */
-  .screen { position: fixed; inset: 0; z-index: 10; display: none; align-items: center; justify-content: center; background: linear-gradient(180deg, rgba(5, 8, 18, 0.55), rgba(5, 8, 18, 0.88)); }
-  .screen.show { display: flex; }
-  .card { max-width: 680px; width: 92%; padding: 34px 40px; background: rgba(10, 14, 28, 0.92); border: 1px solid rgba(255, 210, 90, 0.5); border-radius: 16px; text-align: center; }
-  .card h1 { margin: 0 0 4px; font-size: 52px; letter-spacing: 3px; color: #ffd25e; text-shadow: 0 3px 0 #7a4a00; }
-  .card h2 { margin: 0 0 10px; font-size: 30px; color: #ffd25e; }
-  .card .tag { font-size: 15px; color: #cfe3ff; margin: 6px 0 18px; }
-  .card p { font-size: 14px; line-height: 1.55; color: #d8dee9; }
-  .btnRow { display: flex; gap: 10px; justify-content: center; flex-wrap: wrap; margin-top: 18px; }
-  button { pointer-events: auto; cursor: pointer; font-size: 15px; font-weight: 700; padding: 11px 22px; border-radius: 9px; border: 1px solid #ffd25e; background: #2a2110; color: #ffd25e; }
-  button:hover { background: #4a3a14; }
-  button.primary { background: #ffd25e; color: #201600; }
-  button.primary:hover { background: #ffe08a; }
-  button[disabled] { opacity: 0.4; cursor: default; }
-  #howto { display: none; margin-top: 16px; text-align: left; font-size: 13px; line-height: 1.7; background: rgba(255,255,255,0.05); padding: 12px 16px; border-radius: 10px; }
-  #howto.show { display: block; }
-  #howto b { color: #ffd25e; }
-
-  /* ---------- Map ---------- */
-  #mapOverlay { background: rgba(4, 7, 16, 0.9); flex-direction: column; }
-  .mapPanel { max-width: 760px; width: 94%; max-height: 84vh; overflow-y: auto; padding: 16px 28px; background: rgba(12, 18, 34, 0.97); border: 1px solid rgba(255, 210, 90, 0.55); border-radius: 14px; }
-  .mapPanel h2 { margin: 0 0 8px; font-size: 24px; color: #ffd25e; letter-spacing: 2px; text-align: center; }
-  .mapSection { font-size: 12px; letter-spacing: 2px; font-weight: 800; color: #9fd8ff; margin: 8px 0 3px; border-bottom: 1px solid #334; padding-bottom: 2px; }
-  .mapRow { display: flex; gap: 10px; align-items: baseline; padding: 2px 4px; font-size: 13px; border-bottom: 1px solid rgba(255,255,255,0.06); }
-  .mapRow.done { color: #8fd8a0; }
-  .mapRow.active { color: #ffd25e; font-weight: 700; }
-  .mapRow.locked { color: #778; }
-  .mapRow.avail { color: #cfe3ff; }
-  .mapNum { width: 22px; font-weight: 800; flex-shrink: 0; }
-  .mapTitle { flex: 1; }
-  .mapState { font-size: 11px; font-weight: 800; letter-spacing: 1px; }
-  .mapStats { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 6px 16px; font-size: 13px; padding: 4px; }
-  .mapHint { margin-top: 14px; text-align: center; font-size: 12px; color: #9aa8bd; }
+  #streetName { font-size: 13px; opacity: .9; }
+  #radioName { font-size: 13px; color: #ffd94a; font-weight: 700; }
+  #minimap { width: 168px; height: 168px; border: 2px solid rgba(255,255,255,.5); border-radius: 6px; background: #22331f; margin-top: 6px; box-shadow: 0 2px 10px rgba(0,0,0,.6); }
+  /* Top-centre: mission objective */
+  #missionBox { top: 12px; left: 50%; transform: translateX(-50%); text-align: center; width: 460px; }
+  #chapterLabel { font-size: 12px; letter-spacing: 2px; color: #ffd94a; font-weight: 700; }
+  #objTitle { font-size: 18px; font-weight: 800; }
+  #objText { font-size: 15px; }
+  #objCount { font-size: 14px; color: #9be36a; font-weight: 700; }
+  #jobText { font-size: 13px; color: #7ec8ff; font-weight: 700; margin-top: 2px; }
+  /* Bottom-left: weapon + respect + keris */
+  #bottomLeft { bottom: 14px; left: 14px; font-size: 14px; }
+  #weaponName { font-size: 17px; font-weight: 800; }
+  #ammo { font-size: 15px; color: #ffd94a; }
+  /* Bottom-right: speedometer */
+  #bottomRight { bottom: 14px; right: 14px; text-align: right; }
+  #speed { font-size: 44px; font-weight: 900; line-height: 1; }
+  #speedUnit { font-size: 14px; }
+  #policeDist { font-size: 13px; color: #ffb0b0; font-weight: 700; }
+  /* Bottom-centre: dialogue */
+  #dialogBox { bottom: 90px; left: 50%; transform: translateX(-50%); width: 560px; background: rgba(0,0,0,.72); border-left: 4px solid #ffd94a; border-radius: 6px; padding: 10px 14px; display: none; }
+  #dialogWho { font-weight: 800; color: #ffd94a; font-size: 14px; }
+  #dialogText { font-size: 15px; margin-top: 2px; }
+  /* Hint bar */
+  #hintBar { bottom: 6px; left: 50%; transform: translateX(-50%); font-size: 12px; opacity: .85; background: rgba(0,0,0,.45); padding: 3px 10px; border-radius: 10px; white-space: nowrap; }
+  /* Achievement toast */
+  #toast { top: 120px; right: 14px; background: rgba(20,20,10,.85); border: 1px solid #ffd94a; border-radius: 8px; padding: 10px 14px; width: 260px; display: none; }
+  #toastTitle { font-weight: 800; color: #ffd94a; }
+  #toastText { font-size: 13px; }
+  /* Garage panel */
+  #garagePanel { top: 200px; left: 14px; background: rgba(0,0,0,.75); border: 1px solid #e8b73c; border-radius: 8px; padding: 10px 12px; font-size: 13px; display: none; width: 300px; }
+  .garageMsg { color: #7be36a; font-weight: 700; margin-top: 6px; }
+  /* Weapon wheel */
+  #weaponWheel { top: 50%; left: 50%; transform: translate(-50%, -50%); display: none; background: rgba(0,0,0,.7); border: 1px solid rgba(255,255,255,.4); border-radius: 10px; padding: 14px 18px; font-size: 15px; }
+  #weaponWheel .wwRow { padding: 4px 8px; border-radius: 5px; }
+  #weaponWheel .wwRow.sel { background: #c81e1e; font-weight: 800; }
+  /* Menus */
+  .screen { position: fixed; inset: 0; z-index: 10; display: none; align-items: center; justify-content: center; flex-direction: column; background: linear-gradient(160deg, rgba(10,16,40,.88), rgba(60,20,10,.82)); text-align: center; padding: 20px; }
+  .screen h1 { font-size: 52px; margin: 0; color: #ffd94a; text-shadow: 0 3px 0 #7a2a00, 0 6px 18px rgba(0,0,0,.7); letter-spacing: 1px; }
+  .screen h2 { font-size: 18px; margin: 6px 0 4px; color: #ffe9a8; font-weight: 600; }
+  .screen p { max-width: 620px; font-size: 15px; line-height: 1.5; }
+  .btnRow { display: flex; gap: 10px; margin-top: 16px; flex-wrap: wrap; justify-content: center; }
+  button { pointer-events: auto; cursor: pointer; font-size: 16px; font-weight: 700; padding: 12px 22px; border-radius: 8px; border: 2px solid #ffd94a; background: #1a2a4a; color: #fff; }
+  button:hover { background: #2a4a7a; }
+  button.primary { background: #c81e1e; }
+  button.primary:hover { background: #e82a2a; }
+  .saveSlots { display: flex; gap: 10px; margin-top: 10px; flex-wrap: wrap; justify-content: center; }
+  .slot { background: rgba(255,255,255,.08); border: 1px solid rgba(255,255,255,.3); border-radius: 8px; padding: 10px 14px; font-size: 13px; min-width: 180px; }
+  .slot button { font-size: 13px; padding: 6px 12px; margin-top: 6px; }
+  #mapScreen { align-items: flex-start; justify-content: flex-start; overflow-y: auto; text-align: left; }
+  #mapScreen .mapInner { max-width: 760px; margin: 30px auto; width: 100%; }
+  #mapMissions .mapRow { display: flex; justify-content: space-between; padding: 6px 8px; border-bottom: 1px solid rgba(255,255,255,.15); font-size: 14px; }
+  #mapMissions .mapRow.done { color: #7be36a; }
+  #mapMissions .mapRow.active { color: #ffd94a; font-weight: 700; }
+  #mapStats { font-size: 14px; line-height: 1.7; margin-top: 10px; }
+  #mapStats td { padding: 2px 12px 2px 0; }
+  .achGrid { display: grid; grid-template-columns: 1fr 1fr; gap: 4px 16px; font-size: 13px; margin-top: 8px; }
+  .achGrid .locked { opacity: .45; }
+  .kbd { background: rgba(255,255,255,.15); border-radius: 4px; padding: 1px 7px; font-weight: 700; }
+  #fps { top: auto; bottom: 40px; right: 14px; font-size: 11px; opacity: .6; }
+  /* Damage flash: a red vignette that pulses when Raka is hurt. */
+  #damageFlash { position: fixed; inset: 0; z-index: 4; pointer-events: none; opacity: 0; background: radial-gradient(ellipse at center, transparent 55%, rgba(200,0,0,.55) 100%); }
+  #damageFlash.low { opacity: .35 !important; animation: lowPulse 1.2s ease-in-out infinite; }
+  @keyframes lowPulse { 0%,100% { opacity: .18; } 50% { opacity: .42; } }
+  /* Photo mode: hide every HUD panel except the toast, for clean shots. */
+  body.photoMode .hud, body.photoMode #dialogBox, body.photoMode #hintBar { display: none !important; }
 </style>
 </head>
 <body>
-<canvas id="game" aria-label="Tanjung Matahari: kota terbuka di pesisir Indonesia, dimainkan dengan keyboard dan mouse"></canvas>
+<canvas id="game" aria-label="Tanjung Matahari: open-world crime game in an Indonesian coastal city"></canvas>
+<div id="damageFlash"></div>
 <p id="status" role="status" aria-live="polite"></p>
 
-<div id="hud">
-  <div id="vitals" class="panel">
-    <div class="row"><span class="label">NYAWA</span><div class="bar"><div id="healthBar"></div></div><span id="healthNum">100</span></div>
-    <div class="row"><span class="label">ARMOR</span><div class="bar"><div id="armourBar"></div></div><span id="armourNum">0</span></div>
-    <div id="money">Rp 300</div>
-    <div id="respect">Anak Baru · 0/8 misi</div>
-    <div id="missionStage">Mode Bebas</div>
-  </div>
-  <div id="wanted" class="panel">
-    <div id="stars">☆☆☆☆☆</div>
-    <div id="wantedLabel">Bersih</div>
-    <div id="clock">06:30</div>
-    <div id="street">Jalan Tanjung Raya</div>
-    <div id="radioName">Dangdut Pantura FM · 98.4 FM</div>
-  </div>
-  <div id="objective" class="panel">
-    <div id="objText">Bebas berkeliling — tekan M untuk peta</div>
-    <div id="objSub">TANJUNG MATAHARI · RAKA</div>
-  </div>
-  <div id="policeBox" class="panel">
-    <div class="polTitle">POLISI TERDEKAT</div>
-    <div id="policeList"></div>
-  </div>
-  <div id="speedBox"><div id="speed">JALAN KAKI</div><div id="speedSub">W A S D gerak · Shift lari · E mobil</div></div>
-  <div id="minimapWrap"><canvas id="minimap" width="190" height="190"></canvas></div>
-  <div id="dialogue" class="panel"></div>
-  <div id="prompt" class="panel"></div>
-  <div id="banner"><div id="bannerTitle"></div><div id="bannerSub"></div></div>
-  <div id="crimeFlash" class="panel"></div>
-  <div id="bustBar" class="panel"><div class="bustTitle">POLISI MENANGKAPMU — JANGAN BERHENTI!</div><div class="bar"><div id="bustFill"></div></div></div>
-  <div id="wheel" class="panel"></div>
+<div class="hud" id="topLeft">
+  <div class="statLine">❤ <span id="healthNum">100</span> &nbsp;🛡 <span id="armourNum">0</span></div>
+  <div class="barWrap"><div class="fill" id="healthBar" style="width:100%"></div></div>
+  <div class="barWrap"><div class="fill" id="armourBar" style="width:0%"></div></div>
+  <div id="money">Rp 300.000</div>
+  <div id="stars">☆☆☆☆☆</div>
+  <div id="wantedLabel">Aman</div>
 </div>
 
-<div id="title" class="screen">
-  <div class="card">
-    <h1>TANJUNG MATAHARI</h1>
-    <div class="tag">Kota terbuka di pesisir Indonesia · Raka pulang, dan kota ini akan mengenal namanya.</div>
-    <p>Delapan misi cerita dalam tiga bab, kejar-kejaran dengan polisi sampai lima bintang, mobil yang bisa dicuri, tiga stasiun radio, kerja sampingan ojek dan taksi, dan dua belas keris emas tersembunyi di seluruh kota.</p>
-    <div class="btnRow">
-      <button class="primary" data-a="new">▶ Permainan Baru</button>
-      <button data-a="continue">Lanjutkan (Slot 1)</button>
-      <button data-a="howto">Cara Main</button>
-    </div>
-    <div id="howto">
-      <b>W A S D</b> jalan / mengemudi · <b>Shift</b> lari · <b>E</b> masuk / keluar mobil (mencuri mobil menaikkan wanted) ·
-      <b>F / klik kiri</b> pukul / tembak · <b>Q</b> roda senjata · <b>1 / 2 / 3</b> tinju / pistol / shotgun ·
-      <b>R</b> ganti radio · <b>H</b> klakson · <b>M</b> peta · <b>J</b> kerja sampingan · <b>Esc</b> jeda &amp; simpan.
-      Seret mouse untuk memutar kamera. Ikuti berlian kuning kecil untuk misi.
-    </div>
+<div class="hud" id="topRight">
+  <div id="clock">16:24</div>
+  <div id="streetName">Jl. Pantai Indah — Pantai Matahari</div>
+  <div id="radioName">Dangdut Pantai 88.4</div>
+  <canvas id="minimap" width="168" height="168"></canvas>
+</div>
+
+<div class="hud" id="missionBox">
+  <div id="chapterLabel">Bab 1</div>
+  <div id="objTitle">Paket Pasar Malam — Misi 1/8</div>
+  <div id="objText">Pergi ke Pasar Malam</div>
+  <div id="objCount"></div>
+  <div id="jobText"></div>
+  <div id="raceText" style="font-size:13px; color:#7be36a; font-weight:700; display:none"></div>
+</div>
+
+<div class="hud" id="bottomLeft">
+  <div id="weaponName">Tinju</div>
+  <div id="ammo">∞</div>
+  <div id="respectRank">Anak Baru (0)</div>
+  <div class="barWrap" style="width:180px"><div class="fill" id="respectBar" style="width:0%; background:linear-gradient(90deg,#e8b73c,#ffd94a)"></div></div>
+  <div id="respectNext" style="font-size:12px; opacity:.85"></div>
+  <div id="kerisCount">Keris 0/12</div>
+</div>
+
+<div class="hud" id="bottomRight">
+  <div id="policeDist"></div>
+  <div id="speed">0</div>
+  <div id="speedUnit">km/jam</div>
+</div>
+
+<div class="hud" id="dialogBox"><div id="dialogWho">Raka</div><div id="dialogText"></div></div>
+<div class="hud" id="hintBar">WASD jalan · E curi mobil · Q senjata · R radio · M peta · Esc jeda</div>
+<div class="hud" id="toast"><div id="toastTitle"></div><div id="toastText"></div></div>
+<div class="hud" id="garagePanel"></div>
+<div class="hud" id="weaponWheel"></div>
+<div class="hud" id="fps"></div>
+
+<div class="screen" id="titleScreen">
+  <h1>TANJUNG MATAHARI</h1>
+  <h2>Kota pesisir Indonesia · Raka pulang ke Gang Sanca · 8 misi · 3 bab</h2>
+  <p>Sebuah open-world crime game orisinal: jelajahi kota dengan berjalan kaki dan mobil,
+  curi mobil, kabur dari polisi, selesaikan misi cerita, kumpulkan 12 keris emas,
+  menangkan balapan jalanan, dan jadi Legenda Tanjung. Semua nama, karakter, dan
+  tempat di sini adalah ciptaan sendiri — bukan dari game lain.</p>
+  <div class="btnRow">
+    <button class="primary" data-a="new">▶ Permainan Baru</button>
+    <button data-a="continue">↻ Lanjutkan (Slot 1)</button>
+    <button data-a="continue-newest">★ Lanjutkan Terakhir</button>
+    <button data-a="help">❓ Cara Bermain</button>
+  </div>
+  <p style="font-size:13px; opacity:.85" id="titleCareer"></p>
+  <div class="saveSlots" id="titleSlots"></div>
+  <p style="font-size:13px; opacity:.85">WASD gerak · Mouse putar kamera · E curi/keluar mobil · Klik kiri tembak ·
+  Q ganti senjata · R radio · M peta · Esc jeda · F9 mode foto · Gamepad didukung</p>
+  <p style="font-size:12px; opacity:.7" id="titleTip"></p>
+  <p style="font-size:12px; opacity:.6">v1.0.0 — Tanjung Matahari · WebGL2 · tanpa pustaka eksternal · mainkan offline di browser desktop</p>
+</div>
+
+<div class="screen" id="pauseScreen">
+  <h1>JEDA</h1>
+  <h2>Tanjung Matahari menunggu...</h2>
+  <div class="btnRow">
+    <button class="primary" data-a="resume">▶ Lanjutkan</button>
+    <button data-a="save">💾 Simpan (Slot 1)</button>
+    <button data-a="map">🗺 Peta</button>
+    <button data-a="quit">🏠 Menu Utama</button>
+  </div>
+  <div class="saveSlots" id="pauseSlots"></div>
+</div>
+
+<div class="screen" id="mapScreen">
+  <div class="mapInner">
+    <h1 style="font-size:36px">PETA TANJUNG MATAHARI</h1>
+    <h2 id="mapChapter">Bab 1 — Pulang ke Sanca</h2>
+    <div id="mapMissions"></div>
+    <h2>Karier Raka</h2>
+    <div id="mapStats"></div>
+    <h2>Pencapaian <span id="achCount"></span></h2>
+    <div class="achGrid" id="achList"></div>
+    <h2>Tempat Wisata (20)</h2>
+    <div id="tourList" style="font-size:13px; line-height:1.6"></div>
+    <h2>Balapan Jalanan</h2>
+    <div id="raceList"></div>
+    <h2>Pekerjaan Sampingan</h2>
+    <div id="jobList"></div>
+    <p id="mapCareer" style="font-size:13px; opacity:.85"></p>
+    <div class="btnRow"><button class="primary" data-a="resume">▶ Tutup Peta (M)</button></div>
   </div>
 </div>
 
-<div id="pause" class="screen">
-  <div class="card">
-    <h2>JEDA</h2>
-    <p>Istirahat sebentar. Kota Tanjung Matahari menunggumu.</p>
-    <div class="btnRow">
-      <button class="primary" data-a="resume">Lanjutkan</button>
-      <button data-a="save">Simpan (Slot 1)</button>
-      <button data-a="quit">Kembali ke Judul</button>
-    </div>
+<div class="screen" id="deadScreen">
+  <h1>RAKA TUMBANG</h1>
+  <h2>Kota ini belum selesai denganmu.</h2>
+  <p id="deadText">Kesehatanmu habis. Tanjung Matahari masih menunggumu bangkit.</p>
+  <div class="btnRow">
+    <button class="primary" data-a="respawn">↻ Bangkit Lagi</button>
+    <button data-a="quit">🏠 Menu Utama</button>
   </div>
 </div>
 
-<div id="mapOverlay" class="screen">
-  <div class="mapPanel"></div>
-  <div style="margin-top:14px;"><button data-a="close-map">Tutup Peta (M)</button></div>
-</div>
-
-<div id="dead" class="screen">
-  <div class="card">
-    <h2>RAKA TUMBANG</h2>
-    <p>Jalanan Tanjung tidak kenal ampun. Tapi Raka selalu bangkit lagi.</p>
-    <div class="btnRow"><button class="primary" data-a="respawn">Bangun di Rumah Sakit (−Rp 200)</button></div>
+<div class="screen" id="bustedScreen">
+  <h1>DITANGKAP!</h1>
+  <h2>Polisi Tanjung Matahari membawamu ke kantor.</h2>
+  <p>Kamu kehilangan Rp 50.000 dan mobilmu. Tapi cerita belum berakhir.</p>
+  <div class="btnRow">
+    <button class="primary" data-a="respawn">↻ Bebas &amp; Lanjutkan</button>
+    <button data-a="quit">🏠 Menu Utama</button>
   </div>
 </div>
 
-<div id="busted" class="screen">
-  <div class="card">
-    <h2>DITANGKAP!</h2>
-    <p>Polisi menangkap Raka. Denda dibayar, dan dia dibebaskan di Rumah Sakit Harapan.</p>
-    <div class="btnRow"><button class="primary" data-a="busted-ok">Bebas — Kembali ke Jalanan</button></div>
+<div class="screen" id="helpScreen">
+  <h1>CARA BERMAIN</h1>
+  <div style="text-align:left; max-width:640px; font-size:15px; line-height:1.9">
+    <div><span class="kbd">W A S D</span> jalan / menyetir &nbsp; <span class="kbd">Shift</span> lari / nitro</div>
+    <div><span class="kbd">E</span> curi mobil / keluar mobil / simpan di garasi</div>
+    <div><span class="kbd">Klik kiri</span> tembak &nbsp; <span class="kbd">Q</span> / <span class="kbd">1 2 3</span> ganti senjata &nbsp; <span class="kbd">T</span> isi ulang</div>
+    <div><span class="kbd">R</span> ganti radio (3 stasiun) &nbsp; <span class="kbd">M</span> peta &amp; karier &nbsp; <span class="kbd">Esc</span> jeda &amp; simpan</div>
+    <div><span class="kbd">Spasi</span> lompat / rem tangan &nbsp; Gamepad: stik kiri gerak, A masuk mobil, X tembak</div>
+    <div><span class="kbd">F9</span> mode foto (sembunyikan HUD) &nbsp; <span class="kbd">H</span> klakson &nbsp; Sentuhan: stik virtual di layar</div>
+    <div>🎯 Misi: ikuti penanda kuning di peta dan di dunia. Selesaikan 8 misi dalam 3 bab.</div>
+    <div>🗡 Keris emas: 12 tersembunyi di kota — cari kilau emasnya.</div>
+    <div>🚕 Pekerjaan sampingan: taksi, kurir, jaga dermaga — mulai di papan pekerjaannya.</div>
+    <div>🏁 Balapan: 3 sirkuit melawan Dimas, Sari dan Bowo. Ada juga time trial — kalahkan waktumu sendiri.</div>
+    <div>⭐ Wanted: curi mobil dan menembak menaikkan bintang. Sembunyi 26 detik untuk menurunkannya.</div>
+    <div>🚁 Wanted 4: helikopter Elang Udara ikut mengejar. Wanted 5: roadblock dan paku ranjau di jalan — jangan melintasinya!</div>
+    <div>🔧 Garasi Sari: simpan mobil curian, pasang nitro, servis penuh, dan ganti cat (9 warna).</div>
+    <div>❤ Kesehatan pulih perlahan setelah 8 detik tanpa luka (sampai 60). Makan sate di warung untuk pulih penuh.</div>
+    <div>🌧 Cuaca: hujan dan petir datang bergantian; angin dan kabut berubah sepanjang hari.</div>
+    <div>🏆 26 pencapaian, 20 tempat wisata, dan peringkat respect dari Anak Baru sampai Legenda Tanjung.</div>
   </div>
+  <div class="btnRow"><button class="primary" data-a="back">← Kembali</button></div>
 </div>
 
-<script type="module">
-  import { createGame } from './src/main.js';
-  try {
-    createGame(document.getElementById('game'), document);
-  } catch (err) {
-    window.__shotError = String(err && err.message ? err.message : err);
-    document.getElementById('status').textContent = 'Gagal memuat: ' + window.__shotError;
-  }
-</script>
+<script type="module" src="./src/main.js"></script>
 </body>
 </html>
